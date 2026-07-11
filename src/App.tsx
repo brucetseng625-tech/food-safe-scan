@@ -756,8 +756,8 @@ function App() {
                   <span>{lookupState.tfdaMatches.length} 筆</span>
                 </div>
                 <div className="official-list">
-                  {lookupState.tfdaMatches.map((record) => (
-                    <article key={record.id} className="official-item">
+                  {lookupState.tfdaMatches.map((record, index) => (
+                    <article key={`${record.id}-${index}`} className="official-item">
                       <div className="official-item-head">
                         <strong>{record.subject || record.brand || '未命名產品'}</strong>
                         <span>{record.publishedAt || '日期未提供'}</span>

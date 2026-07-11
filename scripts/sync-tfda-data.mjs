@@ -32,7 +32,7 @@ function normalizeRecord(record, index) {
   const publishedAt = toText(record['發布日期'])
 
   return {
-    id: `${publishedAt || 'unknown'}-${subject || brand || importer || manufacturer || index}`,
+    id: `${publishedAt || 'unknown'}-${subject || brand || importer || manufacturer || 'record'}-${index}`,
     subject,
     brand,
     importer,
