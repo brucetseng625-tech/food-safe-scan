@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import type { Html5Qrcode } from 'html5-qrcode'
 import {
@@ -11,6 +11,7 @@ import {
   CircleAlert,
   ImageUp,
   LoaderCircle,
+  RefreshCcw,
   Search,
   ShieldAlert,
   Smartphone,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react'
 import { blacklistStats, officialResources, oilBlacklist, quickSuggestions } from './data/blacklist'
 import { analyzeLookup, type LookupAnalysis, type MatchStatus } from './lib/match'
+import { analyzeTfdaRecords, type TfdaUnsafeDataset, type TfdaUnsafeRecord } from './lib/tfda'
 import './App.css'
 
 type OpenFoodFactsProduct = {
@@ -34,6 +36,7 @@ type LookupState = {
   barcode?: string
   product?: OpenFoodFactsProduct | null
   analysis: LookupAnalysis
+  tfdaMatches: TfdaUnsafeRecord[]
 }
 
 type LookupHistoryEntry = {
@@ -46,6 +49,44 @@ type LookupHistoryEntry = {
 
 const openFoodFactsEndpoint = 'https://world.openfoodfacts.net/api/v2/product'
 const historyStorageKey = 'food-safe-scan-history'
+const tfdaDataUrl = `${import.meta.env.BASE_URL}tfda-unsafe-food.json`
+
+function mapScannerError(error: unknown, source: 'camera' | 'photo') {
+  const message = error instanceof Error ? error.message : String(error)
+  const normalized = message.toLowerCase()
+
+  if (source === 'camera') {
+    if (normalized.includes('notallowederror') || normalized.includes('permission')) {
+      return '相機權限被拒絕了，請到瀏覽器設定允許相機後再試一次。'
+    }
+
+    if (normalized.includes('notfounderror') || normalized.includes('no camera')) {
+      return '這台裝置目前找不到可用相機。'
+    }
+
+    if (normalized.includes('secure context')) {
+      return '相機掃碼需要在 https 網址下開啟。'
+    }
+
+    if (normalized.includes('notreadableerror') || normalized.includes('could not start video source')) {
+      return '相機目前被其他 App 或分頁占用，請先關掉再試。'
+    }
+  }
+
+  if (source === 'photo') {
+    if (normalized.includes('heic') || normalized.includes('heif')) {
+      return 'iPhone 的 HEIC 照片常會導致讀碼失敗，請改拍成 JPG/PNG，或直接用即時相機掃碼。'
+    }
+
+    if (normalized.includes('no multi format readers') || normalized.includes('no barcode')) {
+      return '這張照片沒有成功辨識到條碼，請讓條碼更近、更清楚，並避免反光。'
+    }
+  }
+
+  return source === 'camera'
+    ? '相機啟動失敗，請改用手動輸入條碼或上傳照片。'
+    : '這張照片沒有順利讀到條碼，請換一張近一點、清楚一點的照片。'
+}
 
 function getHistoryLabel(state: LookupState) {
   if (state.product?.product_name) {
@@ -84,6 +125,18 @@ function getNextSteps(status: MatchStatus) {
   }
 }
 
+function getTfdaNextSteps(matchCount: number) {
+  if (matchCount === 0) {
+    return null
+  }
+
+  return [
+    '這次已命中食藥署官方不符合食品資料，請先看發布日期與不合格原因。',
+    '若你是消費者，先避免購買同款商品；若你是店家，先暫停上架並核對進貨來源。',
+    '再點官方資料來源確認最新公告，因為同品名可能有不同批次或不同進口商。',
+  ]
+}
+
 function App() {
   const [keyword, setKeyword] = useState('')
   const [barcode, setBarcode] = useState('')
@@ -105,12 +158,25 @@ function App() {
   const [scannerOpen, setScannerOpen] = useState(false)
   const [scannerBusy, setScannerBusy] = useState(false)
   const [scannerError, setScannerError] = useState('')
+  const [tfdaDataset, setTfdaDataset] = useState<TfdaUnsafeDataset | null>(null)
+  const [tfdaError, setTfdaError] = useState('')
 
   const scannerRef = useRef<Html5Qrcode | null>(null)
   const scanResolvedRef = useRef(false)
-  const scannerRegionId = 'barcode-scanner-region'
+  const tfdaPromiseRef = useRef<Promise<TfdaUnsafeDataset | null> | null>(null)
+  const cameraScannerRegionId = 'barcode-camera-scanner-region'
+  const fileScannerRegionId = 'barcode-file-scanner-region'
 
   const resultTone = useMemo(() => {
+    if ((lookupState?.tfdaMatches.length ?? 0) > 0) {
+      return {
+        badge: '命中食藥署官方資料',
+        icon: ShieldAlert,
+        title: '這個查詢結果命中食藥署官方不符合食品資料',
+        description: '這一段是根據食藥署官方開放資料比對出來的，可信度高於手整理的歷史事件名單。',
+      }
+    }
+
     switch (lookupState?.analysis.status) {
       case 'flagged':
         return {
@@ -143,10 +209,14 @@ function App() {
     }
   }, [lookupState])
 
-  const nextSteps = useMemo(
-    () => getNextSteps(lookupState?.analysis.status ?? 'unknown'),
-    [lookupState?.analysis.status],
-  )
+  const nextSteps = useMemo(() => {
+    const tfdaNextSteps = getTfdaNextSteps(lookupState?.tfdaMatches.length ?? 0)
+    if (tfdaNextSteps) {
+      return tfdaNextSteps
+    }
+
+    return getNextSteps(lookupState?.analysis.status ?? 'unknown')
+  }, [lookupState])
 
   useEffect(() => {
     return () => {
@@ -190,6 +260,44 @@ function App() {
     return payload.status === 1 ? payload.product ?? null : null
   }
 
+  const ensureTfdaDataset = useCallback(async (forceRefresh = false) => {
+    if (tfdaDataset && !forceRefresh) {
+      return tfdaDataset
+    }
+
+    if (tfdaPromiseRef.current && !forceRefresh) {
+      return tfdaPromiseRef.current
+    }
+
+    const nextPromise = fetch(tfdaDataUrl, {
+      cache: forceRefresh ? 'no-store' : 'default',
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`TFDA dataset request failed with status ${response.status}`)
+        }
+
+        const payload = (await response.json()) as TfdaUnsafeDataset
+        setTfdaDataset(payload)
+        setTfdaError('')
+        return payload
+      })
+      .catch((error) => {
+        setTfdaError(error instanceof Error ? error.message : '無法載入食藥署官方資料')
+        return null
+      })
+      .finally(() => {
+        tfdaPromiseRef.current = null
+      })
+
+    tfdaPromiseRef.current = nextPromise
+    return nextPromise
+  }, [tfdaDataset])
+
+  useEffect(() => {
+    void ensureTfdaDataset()
+  }, [ensureTfdaDataset])
+
   async function runKeywordLookup(nextKeyword: string) {
     const trimmed = nextKeyword.trim()
     if (!trimmed) {
@@ -200,11 +308,14 @@ function App() {
     setIsLoading(true)
 
     try {
+      const nextTfdaDataset = await ensureTfdaDataset()
       const analysis = analyzeLookup(trimmed)
+      const tfdaMatches = analyzeTfdaRecords([trimmed], nextTfdaDataset)
       const nextState: LookupState = {
         source: 'keyword',
         query: trimmed,
         analysis,
+        tfdaMatches,
       }
       setLookupState(nextState)
       storeHistory(nextState)
@@ -225,12 +336,17 @@ function App() {
 
     try {
       const product = await fetchProductByBarcode(cleanedBarcode)
+      const nextTfdaDataset = await ensureTfdaDataset()
       const analysis = product
         ? analyzeLookup(cleanedBarcode, product.product_name, product.brands)
         : {
             ...analyzeLookup(cleanedBarcode),
             status: 'unknown' as const,
           }
+      const tfdaMatches = analyzeTfdaRecords(
+        [cleanedBarcode, product?.product_name, product?.brands],
+        nextTfdaDataset,
+      )
 
       const nextState: LookupState = {
         source: 'barcode',
@@ -238,6 +354,7 @@ function App() {
         barcode: cleanedBarcode,
         product,
         analysis,
+        tfdaMatches,
       }
       setLookupState(nextState)
       storeHistory(nextState)
@@ -276,15 +393,28 @@ function App() {
 
   async function startScanner() {
     setScannerError('')
+    setLookupError('')
+    await stopScanner()
+
+    if (!window.isSecureContext) {
+      setScannerError('相機掃碼需要在 https 網址下開啟。')
+      return
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setScannerError('這個瀏覽器目前不支援直接開啟相機掃碼，請改用照片或手動輸入。')
+      return
+    }
+
     setScannerOpen(true)
     setScannerBusy(true)
     scanResolvedRef.current = false
 
     try {
       const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode')
-      const instance = new Html5Qrcode(scannerRegionId, {
+      const instance = new Html5Qrcode(cameraScannerRegionId, {
         verbose: false,
-        useBarCodeDetectorIfSupported: true,
+        useBarCodeDetectorIfSupported: false,
         formatsToSupport: [
           Html5QrcodeSupportedFormats.EAN_13,
           Html5QrcodeSupportedFormats.EAN_8,
@@ -320,12 +450,7 @@ function App() {
 
       setScannerBusy(false)
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : '相機啟動失敗，請改用手動輸入條碼或上傳照片。'
-
-      setScannerError(message)
+      setScannerError(mapScannerError(error, 'camera'))
       await stopScanner()
     }
   }
@@ -339,14 +464,22 @@ function App() {
     }
 
     setScannerError('')
+    setLookupError('')
     setScannerBusy(true)
 
     try {
+      const isHeicFile =
+        /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name)
+
+      if (isHeicFile) {
+        throw new Error('heic photo is not supported')
+      }
+
       await stopScanner()
       const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode')
-      const instance = new Html5Qrcode(scannerRegionId, {
+      const instance = new Html5Qrcode(fileScannerRegionId, {
         verbose: false,
-        useBarCodeDetectorIfSupported: true,
+        useBarCodeDetectorIfSupported: false,
         formatsToSupport: [
           Html5QrcodeSupportedFormats.EAN_13,
           Html5QrcodeSupportedFormats.EAN_8,
@@ -361,9 +494,7 @@ function App() {
       setBarcode(decodedText)
       await runBarcodeLookup(decodedText)
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : '這張照片沒有順利讀到條碼，請換一張近一點的照片。'
-      setScannerError(message)
+      setScannerError(mapScannerError(error, 'photo'))
     } finally {
       setScannerBusy(false)
     }
@@ -429,14 +560,14 @@ function App() {
             <label className="secondary-btn file-btn">
               <ImageUp size={18} />
               從照片讀條碼
-              <input type="file" accept="image/*" capture="environment" onChange={handleImageScan} />
+              <input type="file" accept="image/*,.heic,.heif" onChange={handleImageScan} />
             </label>
           </div>
 
           <div className="scanner-panel">
             {scannerOpen ? (
               <div className="scanner-stage">
-                <div id={scannerRegionId} className="scanner-region" />
+                <div id={cameraScannerRegionId} className="scanner-region" />
                 <button type="button" className="icon-btn close-btn" onClick={() => void stopScanner()}>
                   <X size={18} />
                 </button>
@@ -448,12 +579,13 @@ function App() {
                 ) : null}
               </div>
             ) : (
-              <div className="scanner-placeholder" id={scannerRegionId}>
+              <div className="scanner-placeholder">
                 <div className="scan-frame" />
                 <p>相機一打開就直接掃條碼，不需要切頁或跳轉。</p>
               </div>
             )}
           </div>
+          <div id={fileScannerRegionId} className="scanner-host-hidden" aria-hidden="true" />
 
           <form
             className="manual-form"
@@ -617,6 +749,30 @@ function App() {
               </div>
             ) : null}
 
+            {lookupState.tfdaMatches.length > 0 ? (
+              <div className="official-card">
+                <div className="official-card-head">
+                  <strong>食藥署官方命中結果</strong>
+                  <span>{lookupState.tfdaMatches.length} 筆</span>
+                </div>
+                <div className="official-list">
+                  {lookupState.tfdaMatches.map((record) => (
+                    <article key={record.id} className="official-item">
+                      <div className="official-item-head">
+                        <strong>{record.subject || record.brand || '未命名產品'}</strong>
+                        <span>{record.publishedAt || '日期未提供'}</span>
+                      </div>
+                      <p>{record.reason || '原因未提供'}</p>
+                      <small>
+                        {record.brand ? `牌名：${record.brand} · ` : ''}
+                        {record.importer ? `進口商：${record.importer}` : record.manufacturer}
+                      </small>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             {lookupState.analysis.matchedBrands.length > 0 ? (
               <div className="brand-chip-row">
                 {lookupState.analysis.matchedBrands.map((brandGroup) => (
@@ -667,11 +823,30 @@ function App() {
       <section className="support-grid">
         <article className="support-card">
           <div className="section-heading">
-            <span>資料信任感</span>
+            <span>官方資料來源</span>
+            {tfdaDataset ? (
+              <button type="button" className="refresh-btn" onClick={() => void ensureTfdaDataset(true)}>
+                <RefreshCcw size={16} />
+                重新載入
+              </button>
+            ) : null}
           </div>
           <p className="support-copy">
-            條碼資料來自 Open Food Facts，黑名單則先載入你同學網站整理過的歷史油品案例。正式上線時，這一塊很適合換成食藥署匯入的 CSV 或 API。
+            條碼資料來自 Open Food Facts；最新官方不符合食品名單則在建置時直接同步食藥署官方 JSON，避開瀏覽器跨網域限制後再隨網站一起發佈。
           </p>
+          {tfdaDataset ? (
+            <div className="dataset-meta">
+              <div className="info-block">
+                <span className="info-label">官方資料筆數</span>
+                <strong>{tfdaDataset.recordCount}</strong>
+              </div>
+              <div className="info-block">
+                <span className="info-label">本站同步時間</span>
+                <strong>{tfdaDataset.fetchedAt.slice(0, 10)}</strong>
+              </div>
+            </div>
+          ) : null}
+          {tfdaError ? <p className="inline-feedback warning">{tfdaError}</p> : null}
           <div className="resource-list">
             {officialResources.map((resource) => (
               <a key={resource.url} href={resource.url} target="_blank" rel="noreferrer" className="resource-link">

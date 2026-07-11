@@ -14,8 +14,12 @@ export type BlacklistBrandGroup = {
 
 export const officialResources = [
   {
-    label: '衛福部食藥署劣質豬油事件專區',
-    url: 'https://www.fda.gov.tw/TC/site.aspx?sid=4069',
+    label: '食藥署官方開放資料：不符合食品資訊',
+    url: 'https://data.gov.tw/dataset/6133',
+  },
+  {
+    label: '食藥署官方 JSON 端點',
+    url: 'https://data.fda.gov.tw/data/opendata/export/52/json',
   },
   {
     label: 'Open Food Facts 條碼商品資料',

@@ -270,6 +270,15 @@
   margin-top: 1rem;
 }
 
+.scanner-host-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .scanner-stage,
 .scanner-placeholder {
   position: relative;
@@ -478,7 +487,8 @@ input:focus-visible {
 
 .product-card,
 .steps-card,
-.unknown-card {
+.unknown-card,
+.official-card {
   border-radius: 1.2rem;
   border: 1px solid rgba(12, 18, 17, 0.08);
   background: rgba(255, 255, 255, 0.68);
@@ -523,7 +533,9 @@ input:focus-visible {
 }
 
 .brand-chip-row,
-.history-list {
+.history-list,
+.official-list,
+.dataset-meta {
   display: grid;
   gap: 0.7rem;
 }
@@ -548,6 +560,32 @@ input:focus-visible {
   display: grid;
   gap: 0.7rem;
   padding: 1rem;
+}
+
+.official-card {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+}
+
+.official-card-head,
+.official-item-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.official-item {
+  padding: 0.9rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(12, 18, 17, 0.08);
+}
+
+.official-item p,
+.official-item small {
+  color: var(--text-soft);
 }
 
 .steps-list {
@@ -617,6 +655,19 @@ input:focus-visible {
 
 .support-grid {
   margin-bottom: 1rem;
+}
+
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid rgba(11, 61, 55, 0.12);
+  background: #fff;
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 0.45rem 0.75rem;
+  font: inherit;
+  cursor: pointer;
 }
 
 .resource-list,
