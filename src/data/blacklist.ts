@@ -33,16 +33,16 @@ export const downstreamResources = [
     url: 'https://www.fda.gov.tw/tc/sitecontent.aspx?sid=4094',
   },
   {
-    label: '食藥署 2026/07/05 公布的下游業者清單',
-    url: 'https://www.fda.gov.tw/tc/newsContent.aspx?cid=4&id=t634418',
+    label: '中聯油脂案專區：稽查及下架回收情形',
+    url: 'https://www.fda.gov.tw/TC/site.aspx?sid=13707&r=768700034',
   },
   {
-    label: '福壽及泰山油品下游業者清單 PDF',
-    url: 'https://www.fda.gov.tw/tc/includes/GetFile.ashx?id=t408966',
+    label: '官方下游業者 360 家清單 PDF',
+    url: 'https://www.fda.gov.tw/tc/includes/GetFile.ashx?id=f639192110008256222&type=2&cid=51277',
   },
   {
-    label: '臺南市中聯油脂受影響油品查詢與處置專區',
-    url: 'https://health.tainan.gov.tw/list.asp?orcaid=7F827088-05ED-4277-8679-783BB5E47C5C',
+    label: '官方預防性下架產品 440 項 PDF',
+    url: 'https://www.fda.gov.tw/tc/includes/GetFile.ashx?id=f639192111390612445&type=3&iid=13719',
   },
 ] as const
 
@@ -189,8 +189,8 @@ export const blacklistStats = {
 }
 
 export const quickSuggestions = [
-  '泰山大豆沙拉油',
+  '雙蔬鮪魚飯糰',
+  '爭鮮股份有限公司',
+  '南僑油脂事業股份有限公司',
   '益康大豆沙拉油',
-  '健味香油',
-  '福壽',
 ] as const

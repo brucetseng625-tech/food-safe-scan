@@ -277,6 +277,11 @@
   line-height: 1.55;
 }
 
+.section-note {
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+
 .scanner-host-hidden {
   position: absolute;
   width: 1px;

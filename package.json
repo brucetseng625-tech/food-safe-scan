@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "sync:tfda": "node scripts/sync-tfda-data.mjs",
-    "prebuild": "npm run sync:tfda",
+    "sync:downstream": "node scripts/sync-downstream-data.mjs",
+    "prebuild": "npm run sync:tfda && npm run sync:downstream",
     "build": "tsc -b && vite build",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d dist",

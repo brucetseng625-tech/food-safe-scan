@@ -17,7 +17,12 @@ import {
   Smartphone,
   X,
 } from 'lucide-react'
-import { blacklistStats, downstreamResources, officialResources, oilBlacklist, quickSuggestions } from './data/blacklist'
+import { downstreamResources, officialResources, oilBlacklist, quickSuggestions } from './data/blacklist'
+import {
+  analyzeDownstreamRecords,
+  type DownstreamDataset,
+  type DownstreamLookupResult,
+} from './lib/downstream'
 import { analyzeLookup, type LookupAnalysis, type MatchStatus } from './lib/match'
 import { analyzeTfdaRecords, type TfdaUnsafeDataset, type TfdaUnsafeRecord } from './lib/tfda'
 import './App.css'
@@ -37,6 +42,7 @@ type LookupState = {
   product?: OpenFoodFactsProduct | null
   analysis: LookupAnalysis
   tfdaMatches: TfdaUnsafeRecord[]
+  downstreamMatches: DownstreamLookupResult
 }
 
 type LookupHistoryEntry = {
@@ -50,6 +56,7 @@ type LookupHistoryEntry = {
 const openFoodFactsEndpoint = 'https://world.openfoodfacts.net/api/v2/product'
 const historyStorageKey = 'food-safe-scan-history'
 const tfdaDataUrl = `${import.meta.env.BASE_URL}tfda-unsafe-food.json`
+const downstreamDataUrl = `${import.meta.env.BASE_URL}downstream-products.json`
 
 function isLikelyInAppBrowser() {
   if (typeof navigator === 'undefined') {
@@ -174,6 +181,30 @@ function getTfdaNextSteps(matchCount: number) {
   ]
 }
 
+function getDownstreamNextSteps(downstreamMatches: DownstreamLookupResult | undefined) {
+  if (!downstreamMatches) {
+    return null
+  }
+
+  if (downstreamMatches.productMatchCount > 0) {
+    return [
+      '這次已命中食藥署官方預防性下架產品清單，先核對產品名稱與有效日期。',
+      '如果手邊商品名稱相同，先暫停食用、販售或上架，並查看原通路公告。',
+      '再往下看對應業者與官方資料來源，確認是否有退貨或後續更新資訊。',
+    ]
+  }
+
+  if (downstreamMatches.businessMatchCount > 0) {
+    return [
+      '這次已命中食藥署官方下游業者清單，代表該業者曾使用到受影響油品。',
+      '若你要查的是成品，請再輸入更完整的食品名，或直接用條碼查商品名。',
+      '同一業者可能有多項產品，請點官方來源持續核對最新下架與揭露資訊。',
+    ]
+  }
+
+  return null
+}
+
 function App() {
   const [keyword, setKeyword] = useState('')
   const [barcode, setBarcode] = useState('')
@@ -197,18 +228,42 @@ function App() {
   const [scannerError, setScannerError] = useState('')
   const [tfdaDataset, setTfdaDataset] = useState<TfdaUnsafeDataset | null>(null)
   const [tfdaError, setTfdaError] = useState('')
+  const [downstreamDataset, setDownstreamDataset] = useState<DownstreamDataset | null>(null)
+  const [downstreamError, setDownstreamError] = useState('')
 
   const scannerRef = useRef<Html5Qrcode | null>(null)
   const scanResolvedRef = useRef(false)
   const tfdaPromiseRef = useRef<Promise<TfdaUnsafeDataset | null> | null>(null)
+  const downstreamPromiseRef = useRef<Promise<DownstreamDataset | null> | null>(null)
   const cameraCaptureInputRef = useRef<HTMLInputElement | null>(null)
   const cameraScannerRegionId = 'barcode-camera-scanner-region'
   const fileScannerRegionId = 'barcode-file-scanner-region'
   const cameraHintText = getCameraHintText()
 
   const resultTone = useMemo(() => {
+    if ((lookupState?.downstreamMatches.productMatchCount ?? 0) > 0) {
+      return {
+        tone: 'flagged' as const,
+        badge: '命中官方下游產品名單',
+        icon: ShieldAlert,
+        title: '這個食品已命中食藥署官方預防性下架產品清單',
+        description: '這一段直接對到官方公布的產品名稱與有效日期，比只看品牌或油品名更接近消費者手上的食品。',
+      }
+    }
+
+    if ((lookupState?.downstreamMatches.businessMatchCount ?? 0) > 0) {
+      return {
+        tone: 'watch' as const,
+        badge: '命中官方下游業者名單',
+        icon: CircleAlert,
+        title: '這次查詢命中食藥署官方下游業者名單',
+        description: '代表這個業者曾使用到受影響油品，下一步應再核對該業者公開揭露的產品資訊。',
+      }
+    }
+
     if ((lookupState?.tfdaMatches.length ?? 0) > 0) {
       return {
+        tone: 'flagged' as const,
         badge: '命中食藥署官方資料',
         icon: ShieldAlert,
         title: '這個查詢結果命中食藥署官方不符合食品資料',
@@ -219,6 +274,7 @@ function App() {
     switch (lookupState?.analysis.status) {
       case 'flagged':
         return {
+          tone: 'flagged' as const,
           badge: '命中歷史黑名單',
           icon: ShieldAlert,
           title: '這個品項已命中歷史問題油品名單',
@@ -226,6 +282,7 @@ function App() {
         }
       case 'watch':
         return {
+          tone: 'watch' as const,
           badge: '品牌有歷史風險',
           icon: CircleAlert,
           title: '同品牌曾出現在歷史黑名單，請再核對產品名',
@@ -233,6 +290,7 @@ function App() {
         }
       case 'clear':
         return {
+          tone: 'clear' as const,
           badge: '未命中載入名單',
           icon: CheckCircle2,
           title: '這次查詢沒有命中目前載入的歷史油品黑名單',
@@ -240,6 +298,7 @@ function App() {
         }
       default:
         return {
+          tone: 'unknown' as const,
           badge: '資料不足',
           icon: CircleAlert,
           title: '目前還沒有足夠資料做判斷',
@@ -249,6 +308,11 @@ function App() {
   }, [lookupState])
 
   const nextSteps = useMemo(() => {
+    const downstreamNextSteps = getDownstreamNextSteps(lookupState?.downstreamMatches)
+    if (downstreamNextSteps) {
+      return downstreamNextSteps
+    }
+
     const tfdaNextSteps = getTfdaNextSteps(lookupState?.tfdaMatches.length ?? 0)
     if (tfdaNextSteps) {
       return tfdaNextSteps
@@ -342,9 +406,47 @@ function App() {
     return nextPromise
   }, [tfdaDataset])
 
+  const ensureDownstreamDataset = useCallback(async (forceRefresh = false) => {
+    if (downstreamDataset && !forceRefresh) {
+      return downstreamDataset
+    }
+
+    if (downstreamPromiseRef.current && !forceRefresh) {
+      return downstreamPromiseRef.current
+    }
+
+    const nextPromise = fetch(downstreamDataUrl, {
+      cache: forceRefresh ? 'no-store' : 'default',
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Downstream dataset request failed with status ${response.status}`)
+        }
+
+        const payload = (await response.json()) as DownstreamDataset
+        setDownstreamDataset(payload)
+        setDownstreamError('')
+        return payload
+      })
+      .catch((error) => {
+        setDownstreamError(error instanceof Error ? error.message : '無法載入官方下游清單')
+        return null
+      })
+      .finally(() => {
+        downstreamPromiseRef.current = null
+      })
+
+    downstreamPromiseRef.current = nextPromise
+    return nextPromise
+  }, [downstreamDataset])
+
   useEffect(() => {
     void ensureTfdaDataset()
   }, [ensureTfdaDataset])
+
+  useEffect(() => {
+    void ensureDownstreamDataset()
+  }, [ensureDownstreamDataset])
 
   async function runKeywordLookup(nextKeyword: string) {
     const trimmed = nextKeyword.trim()
@@ -356,14 +458,19 @@ function App() {
     setIsLoading(true)
 
     try {
-      const nextTfdaDataset = await ensureTfdaDataset()
+      const [nextTfdaDataset, nextDownstreamDataset] = await Promise.all([
+        ensureTfdaDataset(),
+        ensureDownstreamDataset(),
+      ])
       const analysis = analyzeLookup(trimmed)
       const tfdaMatches = analyzeTfdaRecords([trimmed], nextTfdaDataset)
+      const downstreamMatches = analyzeDownstreamRecords([trimmed], nextDownstreamDataset)
       const nextState: LookupState = {
         source: 'keyword',
         query: trimmed,
         analysis,
         tfdaMatches,
+        downstreamMatches,
       }
       setLookupState(nextState)
       storeHistory(nextState)
@@ -384,7 +491,10 @@ function App() {
 
     try {
       const product = await fetchProductByBarcode(cleanedBarcode)
-      const nextTfdaDataset = await ensureTfdaDataset()
+      const [nextTfdaDataset, nextDownstreamDataset] = await Promise.all([
+        ensureTfdaDataset(),
+        ensureDownstreamDataset(),
+      ])
       const analysis = product
         ? analyzeLookup(cleanedBarcode, product.product_name, product.brands)
         : {
@@ -395,6 +505,10 @@ function App() {
         [cleanedBarcode, product?.product_name, product?.brands],
         nextTfdaDataset,
       )
+      const downstreamMatches = analyzeDownstreamRecords(
+        [cleanedBarcode, product?.product_name, product?.brands],
+        nextDownstreamDataset,
+      )
 
       const nextState: LookupState = {
         source: 'barcode',
@@ -403,6 +517,7 @@ function App() {
         product,
         analysis,
         tfdaMatches,
+        downstreamMatches,
       }
       setLookupState(nextState)
       storeHistory(nextState)
@@ -581,23 +696,23 @@ function App() {
       <section className="hero-panel">
         <div className="hero-copy">
           <span className="eyebrow">手機優先食安查詢</span>
-          <h1>掃一下條碼，就知道這款油品有沒有踩到歷史黑名單</h1>
+          <h1>掃一下條碼，或輸入食品名，就知道有沒有踩到官方下游名單</h1>
           <p className="hero-text">
-            這版把原本站分散的功能收斂成最短路徑：掃碼、立即判斷、再看依據。先幫民眾做決定，再讓他們決定要不要往下讀。
+            這版把原本站分散的功能收斂成最短路徑：掃碼、輸入食品名或業者名、直接看官方命中。先幫民眾判斷，再帶他們往下核對來源。
           </p>
 
           <div className="hero-stats">
             <div className="stat-card">
-              <strong>{blacklistStats.products}</strong>
-              <span>歷史問題品項</span>
+              <strong>{downstreamDataset?.preventiveProductCount ?? 440}</strong>
+              <span>預防性下架產品</span>
             </div>
             <div className="stat-card">
-              <strong>{blacklistStats.brands}</strong>
-              <span>品牌群組</span>
+              <strong>{downstreamDataset?.businessCount ?? 360}</strong>
+              <span>官方下游業者</span>
             </div>
             <div className="stat-card">
-              <strong>{blacklistStats.affectedBusinesses}</strong>
-              <span>受波及據點</span>
+              <strong>{tfdaDataset?.recordCount ?? 2487}</strong>
+              <span>食藥署不合格食品</span>
             </div>
           </div>
         </div>
@@ -609,9 +724,9 @@ function App() {
               <span>新版操作節奏</span>
             </div>
             <ol className="flow-list">
-              <li>1. 開相機掃條碼，或先拍照上傳。</li>
-              <li>2. 先看紅燈、黃燈、未命中，不逼使用者讀長文。</li>
-              <li>3. 需要時再往下看品牌、品項、城市與官方連結。</li>
+              <li>1. 直接掃食品條碼，或輸入食品名、業者名。</li>
+              <li>2. 先看有沒有命中官方下游產品或業者名單。</li>
+              <li>3. 需要時再往下看批號、有效日期、城市與官方連結。</li>
             </ol>
           </div>
         </div>
@@ -705,12 +820,12 @@ function App() {
           <div className="card-head">
             <div>
               <span className="card-kicker">關鍵字模式</span>
-              <h2>手動輸入商品名</h2>
+              <h2>手動輸入食品名或業者名</h2>
             </div>
             <Search size={20} />
           </div>
 
-          <p className="card-copy">適合老闆、店員或消費者直接輸入品名。像「泰山大豆沙拉油」這種完整商品名，會比只打品牌更準。</p>
+          <p className="card-copy">適合直接輸入食品名、品牌或業者名。像「雙蔬鮪魚飯糰」或「南僑油脂事業股份有限公司」都能直接比對官方名單。</p>
 
           <form
             className="input-stack"
@@ -720,7 +835,7 @@ function App() {
             }}
           >
             <input
-              placeholder="例如：益康大豆沙拉油"
+              placeholder="例如：雙蔬鮪魚飯糰／爭鮮股份有限公司"
               value={keyword}
               onChange={(event) => setKeyword(event.target.value)}
             />
@@ -748,7 +863,7 @@ function App() {
 
           <div className="trust-box">
             <CircleAlert size={18} />
-            <p>新版不會直接說「安全」，只會說有沒有命中目前載入的歷史黑名單，以及下一步該去哪裡核對。</p>
+            <p>新版不會直接說「安全」，只會說有沒有命中官方下游產品、下游業者或不合格食品資料，以及下一步該去哪裡核對。</p>
           </div>
         </article>
       </section>
@@ -767,7 +882,7 @@ function App() {
         {lookupError ? <p className="inline-feedback danger">{lookupError}</p> : null}
 
         {lookupState ? (
-          <article className={`result-card tone-${lookupState.analysis.status}`}>
+          <article className={`result-card tone-${resultTone.tone}`}>
             <div className="result-top">
               <div>
                 <span className="result-badge">{resultTone.badge}</span>
@@ -835,6 +950,66 @@ function App() {
                 <p>
                   這次只比對到品牌層級風險，還沒命中具體黑名單品項。對手機 UX 來說，這比直接放一大段說明更容易懂。
                 </p>
+              </div>
+            ) : null}
+
+            {lookupState.downstreamMatches.productMatchCount > 0 ? (
+              <div className="official-card">
+                <div className="official-card-head">
+                  <strong>食藥署官方預防性下架產品</strong>
+                  <span>{lookupState.downstreamMatches.productMatchCount} 項</span>
+                </div>
+                <div className="official-list">
+                  {lookupState.downstreamMatches.productMatches.map((entry) => (
+                    <article key={entry.id} className="official-item">
+                      <div className="official-item-head">
+                        <strong>{entry.productName}</strong>
+                        <span>{entry.expiry || '日期未提供'}</span>
+                      </div>
+                      <p>
+                        {entry.business} · {entry.city}
+                      </p>
+                      <small>官方產品序號：{entry.productNo}</small>
+                    </article>
+                  ))}
+                </div>
+                {lookupState.downstreamMatches.productMatchCount > lookupState.downstreamMatches.productMatches.length ? (
+                  <small className="section-note">
+                    先顯示前 {lookupState.downstreamMatches.productMatches.length} 項，完整名單請再點官方來源查看。
+                  </small>
+                ) : null}
+              </div>
+            ) : null}
+
+            {lookupState.downstreamMatches.businessMatchCount > 0 ? (
+              <div className="official-card">
+                <div className="official-card-head">
+                  <strong>食藥署官方下游業者</strong>
+                  <span>{lookupState.downstreamMatches.businessMatchCount} 家</span>
+                </div>
+                <div className="official-list">
+                  {lookupState.downstreamMatches.businessMatches.map((entry) => (
+                    <article key={entry.id} className="official-item">
+                      <div className="official-item-head">
+                        <strong>
+                          {entry.business}
+                          {entry.status === 'market' ? '' : ' · 需看官方備註'}
+                        </strong>
+                        <span>{entry.city}</span>
+                      </div>
+                      <p>{entry.oilItems.map((item) => item.name).join('、')}</p>
+                      <small>
+                        序號：{entry.businessNo}
+                        {entry.statusNote ? ` · ${entry.statusNote}` : ''}
+                      </small>
+                    </article>
+                  ))}
+                </div>
+                {lookupState.downstreamMatches.businessMatchCount > lookupState.downstreamMatches.businessMatches.length ? (
+                  <small className="section-note">
+                    先顯示前 {lookupState.downstreamMatches.businessMatches.length} 家，完整名單請再點官方來源查看。
+                  </small>
+                ) : null}
               </div>
             ) : null}
 
@@ -913,29 +1088,49 @@ function App() {
         <article className="support-card">
           <div className="section-heading">
             <span>官方資料來源</span>
-            {tfdaDataset ? (
-              <button type="button" className="refresh-btn" onClick={() => void ensureTfdaDataset(true)}>
+            {tfdaDataset || downstreamDataset ? (
+              <button
+                type="button"
+                className="refresh-btn"
+                onClick={() => {
+                  void Promise.all([ensureTfdaDataset(true), ensureDownstreamDataset(true)])
+                }}
+              >
                 <RefreshCcw size={16} />
                 重新載入
               </button>
             ) : null}
           </div>
           <p className="support-copy">
-            條碼資料來自 Open Food Facts；最新官方不符合食品名單則在建置時直接同步食藥署官方 JSON，避開瀏覽器跨網域限制後再隨網站一起發佈。
+            條碼資料來自 Open Food Facts；官方不符合食品名單與中聯油脂案下游名單則在建置時直接同步食藥署官方 JSON / PDF，再隨網站一起發佈。
           </p>
-          {tfdaDataset ? (
+          {tfdaDataset || downstreamDataset ? (
             <div className="dataset-meta">
+              {downstreamDataset ? (
+                <>
+                  <div className="info-block">
+                    <span className="info-label">下游業者</span>
+                    <strong>{downstreamDataset.businessCount}</strong>
+                    <small>其中 {downstreamDataset.marketBusinessCount} 家仍屬流入市面名單</small>
+                  </div>
+                  <div className="info-block">
+                    <span className="info-label">預防性下架產品</span>
+                    <strong>{downstreamDataset.preventiveProductCount}</strong>
+                  </div>
+                </>
+              ) : null}
               <div className="info-block">
                 <span className="info-label">官方資料筆數</span>
-                <strong>{tfdaDataset.recordCount}</strong>
+                <strong>{tfdaDataset?.recordCount ?? '載入中'}</strong>
               </div>
               <div className="info-block">
                 <span className="info-label">本站同步時間</span>
-                <strong>{tfdaDataset.fetchedAt.slice(0, 10)}</strong>
+                <strong>{(downstreamDataset?.fetchedAt ?? tfdaDataset?.fetchedAt ?? '').slice(0, 10)}</strong>
               </div>
             </div>
           ) : null}
           {tfdaError ? <p className="inline-feedback warning">{tfdaError}</p> : null}
+          {downstreamError ? <p className="inline-feedback warning">{downstreamError}</p> : null}
           <div className="resource-list">
             {officialResources.map((resource) => (
               <a key={resource.url} href={resource.url} target="_blank" rel="noreferrer" className="resource-link">
