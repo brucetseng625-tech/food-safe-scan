@@ -1,0 +1,92 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap');
+
+:root {
+  --bg: #efe7dc;
+  --panel: rgba(255, 250, 243, 0.92);
+  --border: rgba(27, 34, 32, 0.1);
+  --ink: #1d2522;
+  --text: #35413d;
+  --text-soft: #6b7570;
+  --accent: #0b3d37;
+  --accent-ghost: #dfe9e2;
+  --signal: #f5872e;
+  --tag-bg: rgba(11, 61, 55, 0.08);
+  --tag-text: #0b3d37;
+  --shadow-soft:
+    0 12px 30px rgba(30, 32, 26, 0.08),
+    0 3px 10px rgba(30, 32, 26, 0.05);
+  --font-body: 'Noto Sans TC', sans-serif;
+  --font-display: 'Space Grotesk', 'Noto Sans TC', sans-serif;
+
+  font: 16px/1.6 var(--font-body);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at top left, rgba(245, 135, 46, 0.12), transparent 28%),
+    linear-gradient(180deg, #efe7dc, #ece2d5);
+}
+
+#root {
+  width: min(1120px, calc(100% - 1rem));
+  margin: 0 auto;
+  padding: 0.75rem 0 1rem;
+}
+
+h1,
+h2,
+h3,
+strong {
+  color: var(--ink);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  line-height: 1.05;
+}
+
+h1 {
+  margin-top: 0.8rem;
+  font-size: clamp(2.45rem, 7vw, 4.8rem);
+  letter-spacing: -0.05em;
+}
+
+h2 {
+  font-size: clamp(1.55rem, 4.6vw, 2rem);
+}
+
+h3 {
+  font-size: clamp(1.35rem, 4vw, 1.8rem);
+}
+
+p {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
