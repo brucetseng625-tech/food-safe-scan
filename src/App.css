@@ -270,6 +270,13 @@
   margin-top: 1rem;
 }
 
+.scanner-note {
+  margin: 0.8rem 0 0;
+  color: var(--text-soft);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
 .scanner-host-hidden {
   position: absolute;
   width: 1px;

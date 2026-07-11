@@ -27,6 +27,25 @@ export const officialResources = [
   },
 ] as const
 
+export const downstreamResources = [
+  {
+    label: '食藥署黑心油品事件專區',
+    url: 'https://www.fda.gov.tw/tc/sitecontent.aspx?sid=4094',
+  },
+  {
+    label: '食藥署 2026/07/05 公布的下游業者清單',
+    url: 'https://www.fda.gov.tw/tc/newsContent.aspx?cid=4&id=t634418',
+  },
+  {
+    label: '福壽及泰山油品下游業者清單 PDF',
+    url: 'https://www.fda.gov.tw/tc/includes/GetFile.ashx?id=t408966',
+  },
+  {
+    label: '臺南市中聯油脂受影響油品查詢與處置專區',
+    url: 'https://health.tainan.gov.tw/list.asp?orcaid=7F827088-05ED-4277-8679-783BB5E47C5C',
+  },
+] as const
+
 export const oilBlacklist: BlacklistBrandGroup[] = [
   {
     brand: '泰山企業',

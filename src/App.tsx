@@ -17,7 +17,7 @@ import {
   Smartphone,
   X,
 } from 'lucide-react'
-import { blacklistStats, officialResources, oilBlacklist, quickSuggestions } from './data/blacklist'
+import { blacklistStats, downstreamResources, officialResources, oilBlacklist, quickSuggestions } from './data/blacklist'
 import { analyzeLookup, type LookupAnalysis, type MatchStatus } from './lib/match'
 import { analyzeTfdaRecords, type TfdaUnsafeDataset, type TfdaUnsafeRecord } from './lib/tfda'
 import './App.css'
@@ -51,11 +51,40 @@ const openFoodFactsEndpoint = 'https://world.openfoodfacts.net/api/v2/product'
 const historyStorageKey = 'food-safe-scan-history'
 const tfdaDataUrl = `${import.meta.env.BASE_URL}tfda-unsafe-food.json`
 
+function isLikelyInAppBrowser() {
+  if (typeof navigator === 'undefined') {
+    return false
+  }
+
+  const userAgent = navigator.userAgent || ''
+  return /(Line|FBAN|FBAV|Instagram|Messenger|MicroMessenger|WebView)/i.test(userAgent)
+}
+
+function pickPreferredCamera(cameras: Array<{ id: string; label: string }>) {
+  if (cameras.length === 0) {
+    return null
+  }
+
+  const preferred = cameras.find((camera) =>
+    /(back|rear|environment|world|wide|ultra|後鏡頭|背面)/i.test(camera.label),
+  )
+
+  return preferred ?? cameras.at(-1) ?? cameras[0]
+}
+
 function mapScannerError(error: unknown, source: 'camera' | 'photo') {
   const message = error instanceof Error ? error.message : String(error)
   const normalized = message.toLowerCase()
 
   if (source === 'camera') {
+    if (
+      normalized.includes('overconstrainederror') ||
+      normalized.includes('constraint') ||
+      normalized.includes('facingmode')
+    ) {
+      return '這個瀏覽器沒有順利切到後鏡頭，請改用「直接拍照掃條碼」，或換 Safari 開啟。'
+    }
+
     if (normalized.includes('notallowederror') || normalized.includes('permission')) {
       return '相機權限被拒絕了，請到瀏覽器設定允許相機後再試一次。'
     }
@@ -86,6 +115,14 @@ function mapScannerError(error: unknown, source: 'camera' | 'photo') {
   return source === 'camera'
     ? '相機啟動失敗，請改用手動輸入條碼或上傳照片。'
     : '這張照片沒有順利讀到條碼，請換一張近一點、清楚一點的照片。'
+}
+
+function getCameraHintText() {
+  if (isLikelyInAppBrowser()) {
+    return '你現在像是從 App 內建瀏覽器開啟；如果即時相機打不開，請改用「直接拍照掃條碼」，或用 Safari 重新開啟。'
+  }
+
+  return '如果即時相機打不開，通常改用「直接拍照掃條碼」會更穩。'
 }
 
 function getHistoryLabel(state: LookupState) {
@@ -164,8 +201,10 @@ function App() {
   const scannerRef = useRef<Html5Qrcode | null>(null)
   const scanResolvedRef = useRef(false)
   const tfdaPromiseRef = useRef<Promise<TfdaUnsafeDataset | null> | null>(null)
+  const cameraCaptureInputRef = useRef<HTMLInputElement | null>(null)
   const cameraScannerRegionId = 'barcode-camera-scanner-region'
   const fileScannerRegionId = 'barcode-file-scanner-region'
+  const cameraHintText = getCameraHintText()
 
   const resultTone = useMemo(() => {
     if ((lookupState?.tfdaMatches.length ?? 0) > 0) {
@@ -227,6 +266,15 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(historyStorageKey, JSON.stringify(lookupHistory))
   }, [lookupHistory])
+
+  function clearScannerHost(elementId: string) {
+    const host = document.getElementById(elementId)
+    if (!host) {
+      return
+    }
+
+    host.innerHTML = ''
+  }
 
   function storeHistory(nextState: LookupState) {
     const nextEntry: LookupHistoryEntry = {
@@ -367,26 +415,32 @@ function App() {
   }
 
   async function stopScanner() {
-    if (!scannerRef.current) {
+    const currentScanner = scannerRef.current
+    scannerRef.current = null
+    scanResolvedRef.current = false
+
+    if (!currentScanner) {
+      clearScannerHost(cameraScannerRegionId)
+      clearScannerHost(fileScannerRegionId)
       setScannerOpen(false)
       setScannerBusy(false)
       return
     }
 
     try {
-      await scannerRef.current.stop()
+      await currentScanner.stop()
     } catch {
       // Ignore stop errors when the scanner has not fully started.
     }
 
     try {
-      scannerRef.current.clear()
+      currentScanner.clear()
     } catch {
       // Ignore cleanup issues on mobile browsers.
     }
 
-    scannerRef.current = null
-    scanResolvedRef.current = false
+    clearScannerHost(cameraScannerRegionId)
+    clearScannerHost(fileScannerRegionId)
     setScannerOpen(false)
     setScannerBusy(false)
   }
@@ -412,6 +466,12 @@ function App() {
 
     try {
       const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode')
+      const scanConfig = {
+        fps: 10,
+        aspectRatio: 1.25,
+        qrbox: { width: 260, height: 160 },
+        disableFlip: true,
+      }
       const instance = new Html5Qrcode(cameraScannerRegionId, {
         verbose: false,
         useBarCodeDetectorIfSupported: false,
@@ -426,27 +486,42 @@ function App() {
 
       scannerRef.current = instance
 
-      await instance.start(
-        { facingMode: { ideal: 'environment' } },
-        {
-          fps: 10,
-          aspectRatio: 1.25,
-          qrbox: { width: 260, height: 160 },
-          disableFlip: true,
-        },
-        (decodedText) => {
-          if (scanResolvedRef.current) {
-            return
-          }
+      const handleScanSuccess = (decodedText: string) => {
+        if (scanResolvedRef.current) {
+          return
+        }
 
-          scanResolvedRef.current = true
-          setBarcode(decodedText)
-          void stopScanner().then(() => runBarcodeLookup(decodedText))
-        },
-        () => {
-          // Skip noisy frame-by-frame errors.
-        },
-      )
+        scanResolvedRef.current = true
+        setBarcode(decodedText)
+        void stopScanner().then(() => runBarcodeLookup(decodedText))
+      }
+
+      try {
+        await instance.start(
+          { facingMode: 'environment' },
+          scanConfig,
+          handleScanSuccess,
+          () => {
+            // Skip noisy frame-by-frame errors.
+          },
+        )
+      } catch (primaryError) {
+        const cameras = await Html5Qrcode.getCameras().catch(() => [])
+        const preferredCamera = pickPreferredCamera(cameras)
+
+        if (!preferredCamera) {
+          throw primaryError
+        }
+
+        await instance.start(
+          preferredCamera.id,
+          scanConfig,
+          handleScanSuccess,
+          () => {
+            // Skip noisy frame-by-frame errors.
+          },
+        )
+      }
 
       setScannerBusy(false)
     } catch (error) {
@@ -491,6 +566,7 @@ function App() {
 
       const decodedText = await instance.scanFile(file, false)
       instance.clear()
+      clearScannerHost(fileScannerRegionId)
       setBarcode(decodedText)
       await runBarcodeLookup(decodedText)
     } catch (error) {
@@ -558,11 +634,24 @@ function App() {
             </button>
 
             <label className="secondary-btn file-btn">
+              <Camera size={18} />
+              直接拍照掃條碼
+              <input
+                ref={cameraCaptureInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={handleImageScan}
+              />
+            </label>
+
+            <label className="secondary-btn file-btn">
               <ImageUp size={18} />
-              從照片讀條碼
+              從相簿讀條碼
               <input type="file" accept="image/*,.heic,.heif" onChange={handleImageScan} />
             </label>
           </div>
+          <p className="scanner-note">{cameraHintText}</p>
 
           <div className="scanner-panel">
             {scannerOpen ? (
@@ -880,6 +969,23 @@ function App() {
                   ))}
                 </div>
               </details>
+            ))}
+          </div>
+        </article>
+
+        <article className="support-card">
+          <div className="section-heading">
+            <span>下游產品／業者清單</span>
+          </div>
+          <p className="support-copy">
+            目前這個網站主查問題油品本身；如果你要追第二層、第三層「用了這批油做成的食品或業者」，可以直接點下面官方名單。
+          </p>
+          <div className="resource-list">
+            {downstreamResources.map((resource) => (
+              <a key={resource.url} href={resource.url} target="_blank" rel="noreferrer" className="resource-link">
+                <span>{resource.label}</span>
+                <ArrowUpRight size={16} />
+              </a>
             ))}
           </div>
         </article>
