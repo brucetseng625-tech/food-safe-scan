@@ -42,6 +42,7 @@ type LookupState = {
   analysis: LookupAnalysis
   tfdaMatches: TfdaUnsafeRecord[]
   downstreamMatches: DownstreamLookupResult
+  dataStatus: LookupDataStatus
 }
 
 type LookupHistoryEntry = {
@@ -56,6 +57,262 @@ const openFoodFactsEndpoint = 'https://world.openfoodfacts.net/api/v2/product'
 const historyStorageKey = 'food-safe-scan-history'
 const tfdaDataUrl = `${import.meta.env.BASE_URL}tfda-unsafe-food.json`
 const downstreamDataUrl = `${import.meta.env.BASE_URL}downstream-products.json`
+const barcodeSourceUnavailableMessage =
+  '目前暫時連不到條碼商品資料來源，所以這次無法完整判斷是否命中問題品項。請稍後再試，或直接改用商品全名查詢。'
+const officialDatasetUnavailableMessage =
+  '官方資料目前載入不完整，這次結果不能直接視為未命中；請稍後再試，或先重新載入官方資料。'
+
+type BarcodeCatalogStatus = 'loaded' | 'not_found' | 'unavailable'
+
+type LookupDataStatus = {
+  tfdaAvailable: boolean
+  downstreamAvailable: boolean
+  productCatalogStatus?: BarcodeCatalogStatus
+}
+
+type BarcodeCandidateSpec = {
+  key: string
+  xRatio: number
+  yRatio: number
+  widthRatio: number
+  heightRatio: number
+  scale: number
+  monochrome?: boolean
+}
+
+type BarcodeScanCandidate = {
+  key: string
+  file?: File
+  canvas?: HTMLCanvasElement
+}
+
+let barcodeOcrWorkerPromise: Promise<any> | null = null
+
+function buildUnknownAnalysis(...parts: Array<string | undefined>) {
+  const nextAnalysis = analyzeLookup(...parts)
+  return {
+    ...nextAnalysis,
+    status: 'unknown' as const,
+  }
+}
+
+function hasFullOfficialData(dataStatus: LookupDataStatus) {
+  return dataStatus.tfdaAvailable && dataStatus.downstreamAvailable
+}
+
+function hasAnyLookupMatch(state: LookupState) {
+  return (
+    state.analysis.matchedProducts.length > 0 ||
+    state.analysis.matchedBrands.length > 0 ||
+    state.tfdaMatches.length > 0 ||
+    state.downstreamMatches.productMatchCount > 0 ||
+    state.downstreamMatches.businessMatchCount > 0
+  )
+}
+
+function getNumericChecksum(code: string) {
+  const reversed = code
+    .slice(0, -1)
+    .split('')
+    .reverse()
+    .map(Number)
+
+  const sum = reversed.reduce((total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1), 0)
+  return (10 - (sum % 10)) % 10
+}
+
+function isValidBarcodeDigits(code: string) {
+  if (!/^\d+$/.test(code)) {
+    return false
+  }
+
+  if (code.length === 13 || code.length === 12 || code.length === 8) {
+    return Number(code.at(-1)) === getNumericChecksum(code)
+  }
+
+  return false
+}
+
+function extractBarcodeFromOcrText(text: string) {
+  const normalized = text
+    .replace(/[OoDQ]/g, '0')
+    .replace(/[Il|!]/g, '1')
+    .replace(/Z/g, '2')
+    .replace(/[Ss]/g, '5')
+    .replace(/B/g, '8')
+
+  const segments = normalized.match(/[0-9\s]{8,40}/g) ?? []
+  const exactLengths = [13, 12, 8]
+
+  for (const targetLength of exactLengths) {
+    for (const segment of segments) {
+      const digits = segment.replace(/\D/g, '')
+      if (digits.length < targetLength) {
+        continue
+      }
+
+      for (let startIndex = 0; startIndex <= digits.length - targetLength; startIndex += 1) {
+        const candidate = digits.slice(startIndex, startIndex + targetLength)
+        if (isValidBarcodeDigits(candidate)) {
+          return candidate
+        }
+      }
+    }
+  }
+
+  for (const segment of segments) {
+    const digits = segment.replace(/\D/g, '')
+    if (digits.length >= 12 && digits.length <= 14) {
+      return digits.slice(0, 13)
+    }
+  }
+
+  return ''
+}
+
+async function getBarcodeOcrWorker() {
+  if (!barcodeOcrWorkerPromise) {
+    barcodeOcrWorkerPromise = (async () => {
+      const { createWorker, PSM } = await import('tesseract.js')
+      const worker = await createWorker('eng', 1, {
+        logger: () => {},
+      })
+
+      await worker.setParameters({
+        tessedit_pageseg_mode: PSM.SINGLE_LINE,
+        tessedit_char_whitelist: '0123456789 ',
+        preserve_interword_spaces: '1',
+      })
+
+      return worker
+    })()
+  }
+
+  return barcodeOcrWorkerPromise
+}
+
+function getSupportedBarcodeFormats(Html5QrcodeSupportedFormats: {
+  EAN_13: number
+  EAN_8: number
+  UPC_A: number
+  UPC_E: number
+  CODE_128: number
+  CODE_39: number
+  CODE_93: number
+  ITF: number
+  RSS_14: number
+  RSS_EXPANDED: number
+}) {
+  return [
+    Html5QrcodeSupportedFormats.EAN_13,
+    Html5QrcodeSupportedFormats.EAN_8,
+    Html5QrcodeSupportedFormats.UPC_A,
+    Html5QrcodeSupportedFormats.UPC_E,
+    Html5QrcodeSupportedFormats.CODE_128,
+    Html5QrcodeSupportedFormats.CODE_39,
+    Html5QrcodeSupportedFormats.CODE_93,
+    Html5QrcodeSupportedFormats.ITF,
+    Html5QrcodeSupportedFormats.RSS_14,
+    Html5QrcodeSupportedFormats.RSS_EXPANDED,
+  ]
+}
+
+function loadImageFromFile(file: File) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    const objectUrl = URL.createObjectURL(file)
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve(image)
+    }
+
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('unable to load image'))
+    }
+
+    image.src = objectUrl
+  })
+}
+
+function createCroppedCanvas(image: HTMLImageElement, spec: BarcodeCandidateSpec) {
+  const sourceWidth = image.naturalWidth
+  const sourceHeight = image.naturalHeight
+  const cropX = Math.max(0, Math.floor(sourceWidth * spec.xRatio))
+  const cropY = Math.max(0, Math.floor(sourceHeight * spec.yRatio))
+  const cropWidth = Math.max(1, Math.floor(sourceWidth * spec.widthRatio))
+  const cropHeight = Math.max(1, Math.floor(sourceHeight * spec.heightRatio))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.floor(cropWidth * spec.scale))
+  canvas.height = Math.max(1, Math.floor(cropHeight * spec.scale))
+
+  const context = canvas.getContext('2d', { willReadFrequently: spec.monochrome })
+  if (!context) {
+    throw new Error('unable to prepare barcode canvas')
+  }
+
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(image, cropX, cropY, cropWidth, cropHeight, 0, 0, canvas.width, canvas.height)
+
+  if (spec.monochrome) {
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+    const pixels = imageData.data
+
+    for (let index = 0; index < pixels.length; index += 4) {
+      const luminance = pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114
+      const boosted = Math.max(0, Math.min(255, (luminance - 128) * 1.9 + 128))
+      pixels[index] = boosted
+      pixels[index + 1] = boosted
+      pixels[index + 2] = boosted
+    }
+
+    context.putImageData(imageData, 0, 0)
+  }
+
+  return canvas
+}
+
+function canvasToPngFile(canvas: HTMLCanvasElement, originalName: string, variant: string) {
+  return new Promise<File>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('unable to export barcode image'))
+        return
+      }
+
+      resolve(new File([blob], `${originalName}-${variant}.png`, { type: 'image/png' }))
+    }, 'image/png')
+  })
+}
+
+async function buildBarcodeScanCandidates(file: File) {
+  const image = await loadImageFromFile(file)
+  const candidates: BarcodeScanCandidate[] = [{ key: 'original-file', file }]
+
+  // Mobile photos often include a lot of package text above the barcode, so we
+  // retry with tighter crops around the lower barcode band.
+  const specs: BarcodeCandidateSpec[] = [
+    { key: 'full-resample', xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1, scale: 1.35 },
+    { key: 'lower-half', xRatio: 0, yRatio: 0.38, widthRatio: 1, heightRatio: 0.62, scale: 1.8 },
+    { key: 'barcode-band', xRatio: 0.02, yRatio: 0.48, widthRatio: 0.96, heightRatio: 0.34, scale: 2.3, monochrome: true },
+    { key: 'tight-band', xRatio: 0.05, yRatio: 0.56, widthRatio: 0.9, heightRatio: 0.24, scale: 2.8, monochrome: true },
+    { key: 'digits-band', xRatio: 0.04, yRatio: 0.63, widthRatio: 0.92, heightRatio: 0.2, scale: 3.2, monochrome: true },
+    { key: 'digits-tight', xRatio: 0.06, yRatio: 0.69, widthRatio: 0.88, heightRatio: 0.14, scale: 3.8, monochrome: true },
+  ]
+
+  for (const spec of specs) {
+    const canvas = createCroppedCanvas(image, spec)
+    candidates.push({
+      key: spec.key,
+      canvas,
+      file: await canvasToPngFile(canvas, file.name, spec.key),
+    })
+  }
+
+  return candidates
+}
 
 function isLikelyInAppBrowser() {
   if (typeof navigator === 'undefined') {
@@ -114,13 +371,13 @@ function mapScannerError(error: unknown, source: 'camera' | 'photo') {
     }
 
     if (normalized.includes('no multi format readers') || normalized.includes('no barcode')) {
-      return '這張照片沒有成功辨識到條碼，請讓條碼更近、更清楚，並避免反光。'
+      return '這張照片沒有成功辨識到條碼，請先裁到只剩條碼和下方數字，並保留條碼左右留白後再試。'
     }
   }
 
   return source === 'camera'
     ? '相機啟動失敗，請改用手動輸入條碼或上傳照片。'
-    : '這張照片沒有順利讀到條碼，請換一張近一點、清楚一點的照片。'
+    : '這張照片沒有順利讀到條碼，請先裁到只剩條碼與數字，再換一張近一點、清楚一點的照片。'
 }
 
 function getCameraHintText() {
@@ -166,6 +423,26 @@ function getNextSteps(status: MatchStatus) {
         '必要時直接比對官方公告，不只看條碼結果。',
       ]
   }
+}
+
+function getBarcodeLookupNextSteps(productCatalogStatus: BarcodeCatalogStatus | undefined) {
+  if (productCatalogStatus === 'unavailable') {
+    return [
+      '這次不是查到安全，而是條碼商品資料來源暫時連不上。',
+      '請稍後再試一次，或直接改用品名、品牌名查詢。',
+      '若你是店家，建議先用包裝全名對照下方官方清單。',
+    ]
+  }
+
+  if (productCatalogStatus === 'not_found') {
+    return [
+      '這次不是命中問題品項，而是條碼商品庫沒有辨識到這個商品。',
+      '請直接輸入包裝正面的完整品名，再查一次會更準。',
+      '若你有照片，盡量裁到只剩條碼區，從相簿讀碼成功率會更高。',
+    ]
+  }
+
+  return null
 }
 
 function getTfdaNextSteps(matchCount: number) {
@@ -235,11 +512,59 @@ function App() {
   const tfdaPromiseRef = useRef<Promise<TfdaUnsafeDataset | null> | null>(null)
   const downstreamPromiseRef = useRef<Promise<DownstreamDataset | null> | null>(null)
   const cameraCaptureInputRef = useRef<HTMLInputElement | null>(null)
+  const keywordInputRef = useRef<HTMLInputElement | null>(null)
+  const resultPanelRef = useRef<HTMLElement | null>(null)
   const cameraScannerRegionId = 'barcode-camera-scanner-region'
   const fileScannerRegionId = 'barcode-file-scanner-region'
   const cameraHintText = getCameraHintText()
 
+  const scrollToResults = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        resultPanelRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        })
+      })
+    })
+  }, [])
+
+  const focusKeywordLookup = useCallback(() => {
+    keywordInputRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+    })
+    keywordInputRef.current?.focus()
+  }, [])
+
   const resultTone = useMemo(() => {
+    if (!lookupState) {
+      return {
+        tone: 'unknown' as const,
+        badge: '資料不足',
+        icon: CircleAlert,
+        title: '目前還沒有足夠資料做判斷',
+        description: '可能是掃不到商品資料，或輸入內容太泛；可以改用商品全名再查一次。',
+      }
+    }
+
+    const hasFullData = hasFullOfficialData(lookupState.dataStatus)
+    const hasAnyMatch = hasAnyLookupMatch(lookupState)
+
+    if (!hasFullData) {
+      return {
+        tone: 'unknown' as const,
+        badge: '官方資料載入不完整',
+        icon: CircleAlert,
+        title: '這次查詢暫時無法完整比對官方名單',
+        description: '目前不是確認安全，而是本站沒有把官方資料完整載入；請稍後再查一次。',
+      }
+    }
+
     if ((lookupState?.downstreamMatches.productMatchCount ?? 0) > 0) {
       return {
         tone: 'flagged' as const,
@@ -267,6 +592,28 @@ function App() {
         icon: ShieldAlert,
         title: '這個查詢結果命中食藥署官方不符合食品資料',
         description: '這一段是根據食藥署官方開放資料比對出來的，可信度高於手整理的歷史事件名單。',
+      }
+    }
+
+    if (lookupState.source === 'barcode' && !hasAnyMatch) {
+      if (lookupState.dataStatus.productCatalogStatus === 'unavailable') {
+        return {
+          tone: 'unknown' as const,
+          badge: '條碼商品來源暫時失敗',
+          icon: CircleAlert,
+          title: '這次不是未命中，而是條碼商品資料來源暫時連不上',
+          description: '系統沒能先把條碼換成商品名稱，所以這次結果不能當成沒有問題品項。',
+        }
+      }
+
+      if (lookupState.dataStatus.productCatalogStatus === 'not_found') {
+        return {
+          tone: 'unknown' as const,
+          badge: '條碼已讀到，但商品資料未找到',
+          icon: CircleAlert,
+          title: '這串條碼有讀到，但商品資料庫沒有找到對應商品',
+          description: '這不等於安全，也不等於有問題，只是目前沒辦法用商品名去對官方名單。',
+        }
       }
     }
 
@@ -301,12 +648,29 @@ function App() {
           badge: '資料不足',
           icon: CircleAlert,
           title: '目前還沒有足夠資料做判斷',
-          description: '可能是掃不到商品資料，或輸入內容太泛；可以改用商品全名再查一次。',
+          description: '可能是輸入內容太泛，或還需要再改用更完整的商品名稱。',
         }
     }
   }, [lookupState])
 
   const nextSteps = useMemo(() => {
+    if (!lookupState) {
+      return getNextSteps('unknown')
+    }
+
+    if (!hasFullOfficialData(lookupState.dataStatus)) {
+      return [
+        '目前先不要把這次結果當成未命中，因為官方資料沒有完整載入。',
+        '請稍後重新查一次，或按下方的「重新載入」再比對。',
+        '如果是現場要快速判斷，建議同時改用品名再查一次。',
+      ]
+    }
+
+    const barcodeLookupNextSteps = getBarcodeLookupNextSteps(lookupState.dataStatus.productCatalogStatus)
+    if (lookupState.source === 'barcode' && barcodeLookupNextSteps && !hasAnyLookupMatch(lookupState)) {
+      return barcodeLookupNextSteps
+    }
+
     const downstreamNextSteps = getDownstreamNextSteps(lookupState?.downstreamMatches)
     if (downstreamNextSteps) {
       return downstreamNextSteps
@@ -358,6 +722,10 @@ function App() {
     const response = await fetch(
       `${openFoodFactsEndpoint}/${nextBarcode}?fields=code,product_name,brands,image_front_small_url,quantity`,
     )
+
+    if (response.status === 404) {
+      return null
+    }
 
     if (!response.ok) {
       throw new Error('目前暫時連不到條碼商品資料來源。')
@@ -470,9 +838,17 @@ function App() {
         analysis,
         tfdaMatches,
         downstreamMatches,
+        dataStatus: {
+          tfdaAvailable: Boolean(nextTfdaDataset),
+          downstreamAvailable: Boolean(nextDownstreamDataset),
+        },
       }
       setLookupState(nextState)
       storeHistory(nextState)
+      if (!nextTfdaDataset || !nextDownstreamDataset) {
+        setLookupError(officialDatasetUnavailableMessage)
+      }
+      scrollToResults()
     } finally {
       setIsLoading(false)
     }
@@ -489,17 +865,25 @@ function App() {
     setIsLoading(true)
 
     try {
-      const product = await fetchProductByBarcode(cleanedBarcode)
+      let product: OpenFoodFactsProduct | null = null
+      let productCatalogStatus: BarcodeCatalogStatus = 'loaded'
+
+      try {
+        product = await fetchProductByBarcode(cleanedBarcode)
+        productCatalogStatus = product ? 'loaded' : 'not_found'
+      } catch {
+        productCatalogStatus = 'unavailable'
+      }
+
       const [nextTfdaDataset, nextDownstreamDataset] = await Promise.all([
         ensureTfdaDataset(),
         ensureDownstreamDataset(),
       ])
-      const analysis = product
-        ? analyzeLookup(cleanedBarcode, product.product_name, product.brands)
-        : {
-            ...analyzeLookup(cleanedBarcode),
-            status: 'unknown' as const,
-          }
+      const dataStatus: LookupDataStatus = {
+        tfdaAvailable: Boolean(nextTfdaDataset),
+        downstreamAvailable: Boolean(nextDownstreamDataset),
+        productCatalogStatus,
+      }
       const tfdaMatches = analyzeTfdaRecords(
         [cleanedBarcode, product?.product_name, product?.brands],
         nextTfdaDataset,
@@ -508,6 +892,13 @@ function App() {
         [cleanedBarcode, product?.product_name, product?.brands],
         nextDownstreamDataset,
       )
+      const shouldForceUnknown =
+        !hasFullOfficialData(dataStatus) || productCatalogStatus !== 'loaded'
+      const analysis = product
+        ? analyzeLookup(cleanedBarcode, product.product_name, product.brands)
+        : shouldForceUnknown
+          ? buildUnknownAnalysis(cleanedBarcode)
+          : analyzeLookup(cleanedBarcode)
 
       const nextState: LookupState = {
         source: 'barcode',
@@ -517,12 +908,20 @@ function App() {
         analysis,
         tfdaMatches,
         downstreamMatches,
+        dataStatus,
       }
       setLookupState(nextState)
       storeHistory(nextState)
+      if (productCatalogStatus === 'unavailable') {
+        setLookupError(barcodeSourceUnavailableMessage)
+      } else if (!nextTfdaDataset || !nextDownstreamDataset) {
+        setLookupError(officialDatasetUnavailableMessage)
+      }
+      scrollToResults()
     } catch (error) {
       const message = error instanceof Error ? error.message : '條碼查詢失敗，請稍後再試。'
       setLookupError(message)
+      scrollToResults()
     } finally {
       setIsLoading(false)
     }
@@ -589,13 +988,7 @@ function App() {
       const instance = new Html5Qrcode(cameraScannerRegionId, {
         verbose: false,
         useBarCodeDetectorIfSupported: false,
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.CODE_128,
-        ],
+        formatsToSupport: getSupportedBarcodeFormats(Html5QrcodeSupportedFormats),
       })
 
       scannerRef.current = instance
@@ -668,21 +1061,104 @@ function App() {
       const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode')
       const instance = new Html5Qrcode(fileScannerRegionId, {
         verbose: false,
-        useBarCodeDetectorIfSupported: false,
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.CODE_128,
-        ],
+        useBarCodeDetectorIfSupported: true,
+        formatsToSupport: getSupportedBarcodeFormats(Html5QrcodeSupportedFormats),
       })
 
-      const decodedText = await instance.scanFile(file, false)
-      instance.clear()
-      clearScannerHost(fileScannerRegionId)
-      setBarcode(decodedText)
-      await runBarcodeLookup(decodedText)
+      try {
+        const candidates = await buildBarcodeScanCandidates(file)
+        let decodedText = ''
+
+        for (const candidate of candidates) {
+          if (!candidate.file) {
+            continue
+          }
+
+          try {
+            const result = await instance.scanFileV2(candidate.file, false)
+            decodedText = result.decodedText
+            break
+          } catch {
+            // Try the next crop or contrast variant.
+          }
+        }
+
+        if (!decodedText) {
+          const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+            import('@zxing/browser'),
+            import('@zxing/library'),
+          ])
+
+          const hints = new Map()
+          hints.set(DecodeHintType.TRY_HARDER, true)
+          hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+            BarcodeFormat.EAN_13,
+            BarcodeFormat.EAN_8,
+            BarcodeFormat.UPC_A,
+            BarcodeFormat.UPC_E,
+            BarcodeFormat.CODE_128,
+            BarcodeFormat.CODE_39,
+            BarcodeFormat.CODE_93,
+            BarcodeFormat.ITF,
+            BarcodeFormat.RSS_14,
+            BarcodeFormat.RSS_EXPANDED,
+          ])
+
+          const zxingReader = new BrowserMultiFormatReader(hints)
+
+          for (const candidate of candidates) {
+            if (!candidate.canvas) {
+              continue
+            }
+
+            try {
+              const result = zxingReader.decodeFromCanvas(candidate.canvas)
+              decodedText = result.getText()
+              break
+            } catch {
+              // Keep trying tighter crops.
+            }
+          }
+        }
+
+        if (!decodedText) {
+          const worker = await getBarcodeOcrWorker()
+
+          for (const candidate of [...candidates].reverse()) {
+            if (!candidate.canvas) {
+              continue
+            }
+
+            try {
+              const {
+                data: { text },
+              } = await worker.recognize(candidate.canvas)
+              const ocrBarcode = extractBarcodeFromOcrText(text)
+
+              if (ocrBarcode) {
+                decodedText = ocrBarcode
+                break
+              }
+            } catch {
+              // Ignore OCR failures and keep trying other crops.
+            }
+          }
+        }
+
+        if (!decodedText) {
+          throw new Error('no barcode')
+        }
+
+        setBarcode(decodedText)
+        await runBarcodeLookup(decodedText)
+      } finally {
+        try {
+          instance.clear()
+        } catch {
+          // Ignore cleanup issues after file scan.
+        }
+        clearScannerHost(fileScannerRegionId)
+      }
     } catch (error) {
       setScannerError(mapScannerError(error, 'photo'))
     } finally {
@@ -827,6 +1303,7 @@ function App() {
             }}
           >
             <input
+              ref={keywordInputRef}
               placeholder="例如：雙蔬鮪魚飯糰／爭鮮股份有限公司"
               value={keyword}
               onChange={(event) => setKeyword(event.target.value)}
@@ -858,7 +1335,7 @@ function App() {
         </article>
       </section>
 
-      <section className="result-panel">
+      <section ref={resultPanelRef} className="result-panel">
         <div className="section-heading">
           <span>查詢結果</span>
           {isLoading ? (
@@ -1064,19 +1541,26 @@ function App() {
               </ol>
             </div>
 
-            {lookupState.source === 'barcode' && !lookupState.product ? (
+            {lookupState.source === 'barcode' && lookupState.dataStatus.productCatalogStatus !== 'loaded' ? (
               <div className="unknown-card">
-                <strong>條碼資料庫沒有這個商品</strong>
-                <p>這不代表安全或危險，只是目前查不到商品資料。你可以直接改用商品全名查詢。</p>
+                <strong>
+                  {lookupState.dataStatus.productCatalogStatus === 'unavailable'
+                    ? '條碼商品資料來源暫時連不上'
+                    : '條碼有讀到，但商品資料庫沒有找到這個商品'}
+                </strong>
+                <p>
+                  {lookupState.dataStatus.productCatalogStatus === 'unavailable'
+                    ? '所以這次不是已確認沒問題，而是少了條碼對商品名這一步。建議改用包裝上的完整品名查詢。'
+                    : '這不代表安全或危險，只是目前還查不到商品資料。直接輸入包裝上的完整品名會更準。'}
+                </p>
                 <button
                   type="button"
                   className="ghost-btn"
                   onClick={() => {
-                    setKeyword(lookupState.query)
-                    void runKeywordLookup(lookupState.query)
+                    focusKeywordLookup()
                   }}
                 >
-                  用目前內容改做關鍵字查詢
+                  改用品名查詢
                 </button>
               </div>
             ) : null}
