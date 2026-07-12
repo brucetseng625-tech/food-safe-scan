@@ -390,6 +390,39 @@
   gap: 0.55rem;
 }
 
+.ocr-review,
+.assist-detail {
+  margin-top: 1rem;
+  padding: 1rem;
+  border-radius: 1.2rem;
+  border: 1px solid rgba(12, 18, 17, 0.08);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.ocr-review {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.ocr-review-head span {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--text-soft);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.ocr-suggestion-row,
+.assist-tools {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.assist-detail {
+  display: grid;
+  gap: 0.8rem;
+}
+
 .manual-form label {
   color: var(--text-soft);
   font-size: 0.95rem;
@@ -441,6 +474,14 @@ input:focus-visible {
   margin: 0.85rem 0 0;
   padding: 0.85rem 0.95rem;
   border-radius: 1rem;
+}
+
+.inline-feedback.info {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: rgba(11, 61, 55, 0.08);
+  color: var(--accent);
 }
 
 .inline-feedback.warning {

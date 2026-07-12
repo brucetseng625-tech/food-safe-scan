@@ -35,7 +35,7 @@ type OpenFoodFactsProduct = {
 }
 
 type LookupState = {
-  source: 'keyword' | 'barcode'
+  source: 'keyword' | 'barcode' | 'photo'
   query: string
   barcode?: string
   product?: OpenFoodFactsProduct | null
@@ -61,6 +61,8 @@ const barcodeSourceUnavailableMessage =
   '目前暫時連不到條碼商品資料來源，所以這次無法完整判斷是否命中問題品項。請稍後再試，或直接改用商品全名查詢。'
 const officialDatasetUnavailableMessage =
   '官方資料目前載入不完整，這次結果不能直接視為未命中；請稍後再試，或先重新載入官方資料。'
+const photoNameUnavailableMessage =
+  '這張照片裡暫時沒有穩定辨識到商品名，請盡量拍包裝正面的大字品名，或直接手動輸入。'
 
 type BarcodeCatalogStatus = 'loaded' | 'not_found' | 'unavailable'
 
@@ -78,6 +80,8 @@ type BarcodeCandidateSpec = {
   heightRatio: number
   scale: number
   monochrome?: boolean
+  contrast?: number
+  threshold?: number
 }
 
 type BarcodeScanCandidate = {
@@ -86,7 +90,29 @@ type BarcodeScanCandidate = {
   canvas?: HTMLCanvasElement
 }
 
+type ProductTextScanCandidate = {
+  key: string
+  canvas: HTMLCanvasElement
+}
+
+type RankedProductTextCandidate = {
+  text: string
+  score: number
+  confidence: number
+  hanCount: number
+}
+
+type PhotoOcrLine = {
+  text: string
+  confidence: number
+  top: number
+  height: number
+  left: number
+  width: number
+}
+
 let barcodeOcrWorkerPromise: Promise<any> | null = null
+let productNameOcrWorkerPromise: Promise<any> | null = null
 
 function buildUnknownAnalysis(...parts: Array<string | undefined>) {
   const nextAnalysis = analyzeLookup(...parts)
@@ -191,6 +217,26 @@ async function getBarcodeOcrWorker() {
   return barcodeOcrWorkerPromise
 }
 
+async function getProductNameOcrWorker() {
+  if (!productNameOcrWorkerPromise) {
+    productNameOcrWorkerPromise = (async () => {
+      const { createWorker, PSM } = await import('tesseract.js')
+      const worker = await createWorker(['chi_tra', 'eng'], 1, {
+        logger: () => {},
+      })
+
+      await worker.setParameters({
+        tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+        preserve_interword_spaces: '1',
+      })
+
+      return worker
+    })()
+  }
+
+  return productNameOcrWorkerPromise
+}
+
 function getSupportedBarcodeFormats(Html5QrcodeSupportedFormats: {
   EAN_13: number
   EAN_8: number
@@ -259,10 +305,12 @@ function createCroppedCanvas(image: HTMLImageElement, spec: BarcodeCandidateSpec
   if (spec.monochrome) {
     const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
     const pixels = imageData.data
+    const contrast = spec.contrast ?? 1.9
 
     for (let index = 0; index < pixels.length; index += 4) {
       const luminance = pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114
-      const boosted = Math.max(0, Math.min(255, (luminance - 128) * 1.9 + 128))
+      const adjusted = Math.max(0, Math.min(255, (luminance - 128) * contrast + 128))
+      const boosted = typeof spec.threshold === 'number' ? (adjusted >= spec.threshold ? 255 : 0) : adjusted
       pixels[index] = boosted
       pixels[index + 1] = boosted
       pixels[index + 2] = boosted
@@ -312,6 +360,242 @@ async function buildBarcodeScanCandidates(file: File) {
   }
 
   return candidates
+}
+
+function buildProductTextScanCandidates(image: HTMLImageElement) {
+  const specs: BarcodeCandidateSpec[] = [
+    {
+      key: 'title-center-mono',
+      xRatio: 0.18,
+      yRatio: 0.02,
+      widthRatio: 0.7,
+      heightRatio: 0.2,
+      scale: 3.2,
+      monochrome: true,
+      contrast: 2.5,
+      threshold: 168,
+    },
+    {
+      key: 'title-right-mono',
+      xRatio: 0.24,
+      yRatio: 0.02,
+      widthRatio: 0.64,
+      heightRatio: 0.18,
+      scale: 3.3,
+      monochrome: true,
+      contrast: 2.7,
+      threshold: 172,
+    },
+    {
+      key: 'top-focus',
+      xRatio: 0.06,
+      yRatio: 0.02,
+      widthRatio: 0.88,
+      heightRatio: 0.28,
+      scale: 2.4,
+      monochrome: true,
+      contrast: 2.2,
+    },
+    {
+      key: 'top-wide',
+      xRatio: 0.02,
+      yRatio: 0,
+      widthRatio: 0.96,
+      heightRatio: 0.4,
+      scale: 2.05,
+      monochrome: true,
+      contrast: 2.1,
+    },
+    { key: 'upper-half', xRatio: 0.02, yRatio: 0.05, widthRatio: 0.96, heightRatio: 0.5, scale: 1.7 },
+    { key: 'full-image', xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1, scale: 1.25 },
+  ]
+
+  return specs.map((spec) => ({
+    key: spec.key,
+    canvas: createCroppedCanvas(image, spec),
+  })) satisfies ProductTextScanCandidate[]
+}
+
+function normalizePhotoNameText(value: string) {
+  return value
+    .normalize('NFKC')
+    .replace(/[|｜]/g, 'I')
+    .replace(/[「」【】[\]<>]/g, ' ')
+    .replace(/[—–]/g, '-')
+    .replace(/[_~]+/g, ' ')
+    .replace(/^[^0-9A-Za-z\p{Script=Han}]+/u, '')
+    .replace(/[^0-9A-Za-z\p{Script=Han}]+$/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function stripRetailPrefix(value: string) {
+  return value
+    .replace(/^(7[- ]?eleven|7[- ]?11|familymart|ok ?mart|全家便利商店|全家|萊爾富|美廉社|全聯)\s*/iu, '')
+    .replace(/^[A-Z0-9 ]{2,}(?=\s*[\p{Script=Han}])/u, '')
+    .trim()
+}
+
+function scorePhotoNameCandidate(line: PhotoOcrLine, variantIndex: number, lineIndex: number) {
+  const normalized = normalizePhotoNameText(line.text)
+  if (!normalized) {
+    return null
+  }
+
+  const compact = normalized.replace(/\s+/g, '')
+  if (compact.length < 2 || compact.length > 28) {
+    return null
+  }
+
+  if (
+    /(製造日期|有效日期|賞味期限|營養|成分|保存|原產地|條碼|客服|地址|電話|本產品|重量|公克|熱量|每份|過敏|食用|微波|加熱|冷藏|冷凍|蛋白質|脂肪|碳水化合物|鈉|批號)/u.test(
+      normalized,
+    )
+  ) {
+    return null
+  }
+
+  if (/\d{4}[./-]\d{1,2}[./-]\d{1,2}/.test(normalized)) {
+    return null
+  }
+
+  const hanCount = Array.from(normalized).filter((char) => /\p{Script=Han}/u.test(char)).length
+  const latinCount = Array.from(normalized).filter((char) => /[A-Za-z]/.test(char)).length
+  const digitCount = Array.from(normalized).filter((char) => /\d/.test(char)).length
+  const hasFoodKeyword =
+    /(飯糰|豆漿|便當|燒肉|雞胸|三明治|沙拉|漢堡|奶茶|咖啡|鮮奶|牛奶|果汁|麵包|蛋糕|布丁|壽司|拉麵|涼麵|炒飯|粥|吐司|可頌|sandwich|salad|burger|coffee|milk|tea|rice|noodle)/iu.test(
+      normalized,
+    )
+
+  if (hanCount + latinCount < 2 || digitCount > hanCount + latinCount) {
+    return null
+  }
+
+  if (hanCount < 2 && !hasFoodKeyword) {
+    return null
+  }
+
+  let score = hanCount * 5 + latinCount
+  score += Math.max(0, 8 - variantIndex * 2)
+  score += Math.max(0, 6 - lineIndex)
+  score += Math.min(12, line.confidence / 9)
+  score += Math.min(12, line.height / 14)
+  score += Math.max(0, 8 - line.top / 36)
+
+  if (hanCount >= 2) {
+    score += 12
+  } else if (latinCount >= 4) {
+    score -= 8
+  }
+
+  if (hasFoodKeyword) {
+    score += 8
+  }
+
+  if (/[-－—]/.test(normalized)) {
+    score += 1
+  }
+
+  return {
+    text: stripRetailPrefix(normalized),
+    score,
+    confidence: line.confidence,
+    hanCount,
+  } satisfies RankedProductTextCandidate
+}
+
+function collectPhotoOcrLines(pageData: any) {
+  const lines: PhotoOcrLine[] = []
+
+  if (pageData?.blocks) {
+    for (const block of pageData.blocks) {
+      for (const paragraph of block.paragraphs ?? []) {
+        for (const line of paragraph.lines ?? []) {
+          if (line?.text) {
+            const bbox = line.bbox ?? {}
+            lines.push({
+              text: line.text,
+              confidence: Number(line.confidence ?? paragraph.confidence ?? block.confidence ?? 0),
+              top: Number(bbox.y0 ?? 0),
+              height: Math.max(0, Number(bbox.y1 ?? 0) - Number(bbox.y0 ?? 0)),
+              left: Number(bbox.x0 ?? 0),
+              width: Math.max(0, Number(bbox.x1 ?? 0) - Number(bbox.x0 ?? 0)),
+            })
+          }
+        }
+      }
+    }
+  }
+
+  if (pageData?.text) {
+    lines.push(
+      ...String(pageData.text)
+        .split('\n')
+        .map((text) => ({
+          text,
+          confidence: 0,
+          top: 0,
+          height: 0,
+          left: 0,
+          width: 0,
+        })),
+    )
+  }
+
+  return lines
+}
+
+function rankPhotoNameCandidates(lines: Array<PhotoOcrLine & { variantIndex: number; lineIndex: number }>) {
+  const bestByText = new Map<string, RankedProductTextCandidate>()
+
+  for (const line of lines) {
+    const scored = scorePhotoNameCandidate(line, line.variantIndex, line.lineIndex)
+    if (!scored || !scored.text) {
+      continue
+    }
+
+    const current = bestByText.get(scored.text)
+    if (!current || scored.score > current.score) {
+      bestByText.set(scored.text, scored)
+    }
+  }
+
+  return [...bestByText.values()]
+    .sort((left, right) => {
+      if (left.hanCount >= 2 && right.hanCount < 2) {
+        return -1
+      }
+
+      if (right.hanCount >= 2 && left.hanCount < 2) {
+        return 1
+      }
+
+      if (right.score !== left.score) {
+        return right.score - left.score
+      }
+
+      return right.confidence - left.confidence
+    })
+    .map((entry) => entry.text)
+}
+
+function mapPhotoOcrError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  const normalized = message.toLowerCase()
+
+  if (normalized.includes('heic') || normalized.includes('heif')) {
+    return 'iPhone 的 HEIC 照片常會讓辨識失敗，請改拍成 JPG/PNG 再試。'
+  }
+
+  if (normalized.includes('no product name')) {
+    return '照片裡沒有穩定辨識到商品名，請盡量只拍包裝正面的品名大字。'
+  }
+
+  if (normalized.includes('network') || normalized.includes('fetch') || normalized.includes('language')) {
+    return '照片辨識模型暫時載入失敗，請稍後再試，或直接手動輸入品名。'
+  }
+
+  return photoNameUnavailableMessage
 }
 
 function isLikelyInAppBrowser() {
@@ -385,7 +669,7 @@ function getCameraHintText() {
     return '你現在像是從 App 內建瀏覽器開啟；如果即時相機打不開，請改用「直接拍照掃條碼」，或用 Safari 重新開啟。'
   }
 
-  return '如果即時相機打不開，通常改用「直接拍照掃條碼」會更穩。'
+  return '如果相機或條碼不好讀，主流程建議直接拍包裝正面，讓系統辨識商品名。'
 }
 
 function getHistoryLabel(state: LookupState) {
@@ -445,6 +729,19 @@ function getBarcodeLookupNextSteps(productCatalogStatus: BarcodeCatalogStatus | 
   return null
 }
 
+function getPhotoLookupNextSteps(status: MatchStatus) {
+  switch (status) {
+    case 'clear':
+      return [
+        '這次是用品名比對後未命中目前載入名單，不是條碼資料落空。',
+        '如果你擔心是同系列商品，可以把更完整的品名補上再查一次。',
+        '正式判斷仍以食藥署最新公告與通路公告為準。',
+      ]
+    default:
+      return null
+  }
+}
+
 function getTfdaNextSteps(matchCount: number) {
   if (matchCount === 0) {
     return null
@@ -502,6 +799,10 @@ function App() {
   const [scannerOpen, setScannerOpen] = useState(false)
   const [scannerBusy, setScannerBusy] = useState(false)
   const [scannerError, setScannerError] = useState('')
+  const [photoOcrBusy, setPhotoOcrBusy] = useState(false)
+  const [photoOcrError, setPhotoOcrError] = useState('')
+  const [photoKeywordDraft, setPhotoKeywordDraft] = useState('')
+  const [photoKeywordSuggestions, setPhotoKeywordSuggestions] = useState<string[]>([])
   const [tfdaDataset, setTfdaDataset] = useState<TfdaUnsafeDataset | null>(null)
   const [tfdaError, setTfdaError] = useState('')
   const [downstreamDataset, setDownstreamDataset] = useState<DownstreamDataset | null>(null)
@@ -511,7 +812,6 @@ function App() {
   const scanResolvedRef = useRef(false)
   const tfdaPromiseRef = useRef<Promise<TfdaUnsafeDataset | null> | null>(null)
   const downstreamPromiseRef = useRef<Promise<DownstreamDataset | null> | null>(null)
-  const cameraCaptureInputRef = useRef<HTMLInputElement | null>(null)
   const keywordInputRef = useRef<HTMLInputElement | null>(null)
   const resultPanelRef = useRef<HTMLElement | null>(null)
   const cameraScannerRegionId = 'barcode-camera-scanner-region'
@@ -666,6 +966,11 @@ function App() {
       ]
     }
 
+    const photoLookupNextSteps = lookupState.source === 'photo' ? getPhotoLookupNextSteps(lookupState.analysis.status) : null
+    if (photoLookupNextSteps) {
+      return photoLookupNextSteps
+    }
+
     const barcodeLookupNextSteps = getBarcodeLookupNextSteps(lookupState.dataStatus.productCatalogStatus)
     if (lookupState.source === 'barcode' && barcodeLookupNextSteps && !hasAnyLookupMatch(lookupState)) {
       return barcodeLookupNextSteps
@@ -815,7 +1120,7 @@ function App() {
     void ensureDownstreamDataset()
   }, [ensureDownstreamDataset])
 
-  async function runKeywordLookup(nextKeyword: string) {
+  async function runKeywordLookup(nextKeyword: string, source: LookupState['source'] = 'keyword') {
     const trimmed = nextKeyword.trim()
     if (!trimmed) {
       return
@@ -833,7 +1138,7 @@ function App() {
       const tfdaMatches = analyzeTfdaRecords([trimmed], nextTfdaDataset)
       const downstreamMatches = analyzeDownstreamRecords([trimmed], nextDownstreamDataset)
       const nextState: LookupState = {
-        source: 'keyword',
+        source,
         query: trimmed,
         analysis,
         tfdaMatches,
@@ -851,6 +1156,57 @@ function App() {
       scrollToResults()
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  async function runPhotoNameLookup(file: File) {
+    setPhotoOcrError('')
+    setScannerError('')
+    setLookupError('')
+    setPhotoOcrBusy(true)
+
+    try {
+      const isHeicFile = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name)
+      if (isHeicFile) {
+        throw new Error('heic photo is not supported')
+      }
+
+      const [image, worker] = await Promise.all([loadImageFromFile(file), getProductNameOcrWorker()])
+      const scanCandidates = buildProductTextScanCandidates(image)
+      const collectedLines: Array<PhotoOcrLine & { variantIndex: number; lineIndex: number }> = []
+
+      for (const [variantIndex, candidate] of scanCandidates.entries()) {
+        try {
+          const { data } = await worker.recognize(candidate.canvas, { rotateAuto: true }, { blocks: true })
+          const lines = collectPhotoOcrLines(data)
+
+          lines.forEach((line, lineIndex) => {
+            collectedLines.push({
+              ...line,
+              variantIndex,
+              lineIndex,
+            })
+          })
+        } catch {
+          // Continue trying other cropped regions.
+        }
+      }
+
+      const rankedCandidates = rankPhotoNameCandidates(collectedLines)
+      const nextKeyword = rankedCandidates[0]
+
+      if (!nextKeyword) {
+        throw new Error('no product name')
+      }
+
+      setPhotoKeywordDraft(nextKeyword)
+      setPhotoKeywordSuggestions(rankedCandidates.slice(1, 5))
+      setKeyword(nextKeyword)
+      await runKeywordLookup(nextKeyword, 'photo')
+    } catch (error) {
+      setPhotoOcrError(mapPhotoOcrError(error))
+    } finally {
+      setPhotoOcrBusy(false)
     }
   }
 
@@ -1171,14 +1527,14 @@ function App() {
       <section className="hero-panel">
         <div className="hero-copy">
           <span className="eyebrow">手機優先食安查詢</span>
-          <h1>掃食品條碼，或輸入食品名、業者名，快速看官方名單有沒有命中</h1>
+          <h1>先拍包裝辨識商品名，再對官方名單；條碼改當輔助工具</h1>
           <p className="hero-text">
-            先給你最直接的判斷，再往下看產品名、業者名、批號、有效日期與官方來源，手機上也能一路查到底。
+            主流程先抓包裝上的品名大字，直接核對食藥署名單；如果剛好讀得到條碼，再把它當成補充捷徑。
           </p>
 
           <div className="hero-guides">
-            <span className="hero-guide">可查：食品名、業者名、食品條碼</span>
-            <span className="hero-guide">結果優先顯示官方下游產品與業者名單</span>
+            <span className="hero-guide">主查：拍照辨識商品名、手動輸入食品名</span>
+            <span className="hero-guide">輔助：條碼能對到商品時，再補商品資料與品牌</span>
           </div>
 
           <div className="hero-stats">
@@ -1202,84 +1558,179 @@ function App() {
         <article className="action-card primary-card">
           <div className="card-head">
             <div>
-              <span className="card-kicker">掃碼模式</span>
-              <h2>直接用手機查</h2>
+              <span className="card-kicker">拍照模式</span>
+              <h2>先拍包裝，直接辨識品名</h2>
             </div>
-            <Barcode size={20} />
+            <Camera size={20} />
           </div>
 
-          <p className="card-copy">先掃條碼；如果相機開不起來，再改用拍照或從相簿上傳。</p>
+          <p className="card-copy">這一版把主流程改成拍包裝辨識商品名，再直接核對官方清單；條碼只留作輔助。</p>
 
           <div className="cta-row">
-            <button type="button" className="primary-btn" onClick={() => void startScanner()}>
+            <label className="primary-btn file-btn">
               <Camera size={18} />
-              開啟相機掃碼
-            </button>
-
-            <label className="secondary-btn file-btn">
-              <Camera size={18} />
-              直接拍照掃條碼
+              直接拍照辨識品名
               <input
-                ref={cameraCaptureInputRef}
                 type="file"
                 accept="image/*"
                 capture="environment"
-                onChange={handleImageScan}
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ''
+                  if (file) {
+                    void runPhotoNameLookup(file)
+                  }
+                }}
               />
             </label>
 
             <label className="secondary-btn file-btn">
               <ImageUp size={18} />
-              從相簿讀條碼
-              <input type="file" accept="image/*,.heic,.heif" onChange={handleImageScan} />
+              從相簿辨識品名
+              <input
+                type="file"
+                accept="image/*,.heic,.heif"
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ''
+                  if (file) {
+                    void runPhotoNameLookup(file)
+                  }
+                }}
+              />
             </label>
           </div>
-          <p className="scanner-note">{cameraHintText}</p>
+          <p className="scanner-note">第一次辨識會多等幾秒下載文字模型；如果字不準，你可以直接改字再查。</p>
 
-          <div className="scanner-panel">
-            {scannerOpen ? (
-              <div className="scanner-stage">
-                <div id={cameraScannerRegionId} className="scanner-region" />
-                <button type="button" className="icon-btn close-btn" onClick={() => void stopScanner()}>
-                  <X size={18} />
+          {photoOcrBusy ? (
+            <p className="inline-feedback info">
+              <LoaderCircle size={18} className="spin" />
+              正在辨識照片裡的商品名…
+            </p>
+          ) : null}
+          {photoOcrError ? <p className="inline-feedback warning">{photoOcrError}</p> : null}
+
+          {photoKeywordDraft ? (
+            <div className="ocr-review">
+              <div className="ocr-review-head">
+                <strong>我辨識到的商品名</strong>
+                <span>如果字不夠準，可以直接改字再查</span>
+              </div>
+
+              <form
+                className="input-stack"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void runKeywordLookup(photoKeywordDraft, 'photo')
+                }}
+              >
+                <input
+                  value={photoKeywordDraft}
+                  onChange={(event) => {
+                    setPhotoKeywordDraft(event.target.value)
+                    setKeyword(event.target.value)
+                  }}
+                />
+                <button type="submit" className="secondary-dark-btn">
+                  用這個品名查
+                  <ChevronRight size={18} />
                 </button>
-                {scannerBusy ? (
-                  <div className="scanner-overlay">
-                    <LoaderCircle size={18} className="spin" />
-                    <span>正在準備相機…</span>
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div className="scanner-placeholder">
-                <div className="scan-frame" />
-                <p>相機一打開就直接掃條碼，不需要切頁或跳轉。</p>
-              </div>
-            )}
-          </div>
-          <div id={fileScannerRegionId} className="scanner-host-hidden" aria-hidden="true" />
+              </form>
 
-          <form
-            className="manual-form"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void runBarcodeLookup(barcode)
-            }}
-          >
-            <label htmlFor="barcode-input">沒有要開相機，也可以直接輸入條碼</label>
-            <div className="input-row">
-              <input
-                id="barcode-input"
-                inputMode="numeric"
-                placeholder="例如：471..."
-                value={barcode}
-                onChange={(event) => setBarcode(event.target.value)}
-              />
-              <button type="button" className="dark-btn" onClick={() => void runBarcodeLookup(barcode)}>
-                查條碼
-              </button>
+              {photoKeywordSuggestions.length > 0 ? (
+                <>
+                  <p className="suggestion-label">其他可能字樣</p>
+                  <div className="ocr-suggestion-row">
+                    {photoKeywordSuggestions.map((suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        className="suggestion-chip"
+                        onClick={() => {
+                          setPhotoKeywordDraft(suggestion)
+                          setKeyword(suggestion)
+                          void runKeywordLookup(suggestion, 'photo')
+                        }}
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
             </div>
-          </form>
+          ) : null}
+
+          <details className="assist-detail">
+            <summary className="detail-summary">
+              <div>
+                <strong>想用條碼工具再展開</strong>
+                <span>只有在商品資料庫對得到時，條碼才比較有幫助</span>
+              </div>
+              <span className="detail-count">條碼輔助</span>
+            </summary>
+
+            <div className="assist-tools">
+              <div className="cta-row">
+                <button type="button" className="secondary-btn" onClick={() => void startScanner()}>
+                  <Barcode size={18} />
+                  開啟相機掃條碼
+                </button>
+
+                <label className="secondary-btn file-btn">
+                  <ImageUp size={18} />
+                  從相簿讀條碼
+                  <input type="file" accept="image/*,.heic,.heif" onChange={handleImageScan} />
+                </label>
+              </div>
+              <p className="scanner-note">{cameraHintText}</p>
+
+              <div className="scanner-panel">
+                {scannerOpen ? (
+                  <div className="scanner-stage">
+                    <div id={cameraScannerRegionId} className="scanner-region" />
+                    <button type="button" className="icon-btn close-btn" onClick={() => void stopScanner()}>
+                      <X size={18} />
+                    </button>
+                    {scannerBusy ? (
+                      <div className="scanner-overlay">
+                        <LoaderCircle size={18} className="spin" />
+                        <span>正在準備相機…</span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="scanner-placeholder">
+                    <div className="scan-frame" />
+                    <p>相機一打開就直接掃條碼，不需要切頁或跳轉。</p>
+                  </div>
+                )}
+              </div>
+
+              <form
+                className="manual-form"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void runBarcodeLookup(barcode)
+                }}
+              >
+                <label htmlFor="barcode-input">沒有要開相機，也可以直接輸入條碼</label>
+                <div className="input-row">
+                  <input
+                    id="barcode-input"
+                    inputMode="numeric"
+                    placeholder="例如：471..."
+                    value={barcode}
+                    onChange={(event) => setBarcode(event.target.value)}
+                  />
+                  <button type="button" className="dark-btn" onClick={() => void runBarcodeLookup(barcode)}>
+                    查條碼
+                  </button>
+                </div>
+              </form>
+            </div>
+          </details>
+          <div id={fileScannerRegionId} className="scanner-host-hidden" aria-hidden="true" />
 
           {scannerError ? <p className="inline-feedback warning">{scannerError}</p> : null}
         </article>
@@ -1299,7 +1750,7 @@ function App() {
             className="input-stack"
             onSubmit={(event) => {
               event.preventDefault()
-              void runKeywordLookup(keyword)
+              void runKeywordLookup(keyword, 'keyword')
             }}
           >
             <input
@@ -1323,7 +1774,7 @@ function App() {
                 className="suggestion-chip"
                 onClick={() => {
                   setKeyword(suggestion)
-                  void runKeywordLookup(suggestion)
+                  void runKeywordLookup(suggestion, 'keyword')
                 }}
               >
                 {suggestion}
@@ -1362,7 +1813,13 @@ function App() {
             <div className="result-grid result-grid-compact">
               <div className="info-block">
                 <span className="info-label">查詢方式</span>
-                <strong>{lookupState.source === 'barcode' ? '條碼查詢' : '關鍵字查詢'}</strong>
+                <strong>
+                  {lookupState.source === 'barcode'
+                    ? '條碼查詢'
+                    : lookupState.source === 'photo'
+                      ? '拍照辨識'
+                      : '關鍵字查詢'}
+                </strong>
               </div>
               <div className="info-block">
                 <span className="info-label">輸入內容</span>
@@ -1569,8 +2026,8 @@ function App() {
           <article className="empty-state">
             <AlertTriangle size={24} />
             <div>
-              <h3>先掃碼，再看完整結果</h3>
-              <p>首頁只保留最重要的兩個入口，避免像原站那樣一打開就有太多分頁讓人分心。</p>
+              <h3>先拍照辨識，再看完整結果</h3>
+              <p>現在主流程會先抓包裝上的商品名大字，再直接對官方名單，比單靠條碼更貼近實際食品本身。</p>
             </div>
           </article>
         )}
@@ -1697,12 +2154,21 @@ function App() {
                     }
 
                     setKeyword(entry.label)
-                    void runKeywordLookup(entry.label)
+                    if (entry.source === 'photo') {
+                      setPhotoKeywordDraft(entry.label)
+                    }
+                    void runKeywordLookup(entry.label, entry.source)
                   }}
                 >
                   <div>
                     <strong>{entry.label}</strong>
-                    <small>{entry.source === 'barcode' ? `條碼 ${entry.query}` : '關鍵字查詢'}</small>
+                    <small>
+                      {entry.source === 'barcode'
+                        ? `條碼 ${entry.query}`
+                        : entry.source === 'photo'
+                          ? '拍照辨識'
+                          : '關鍵字查詢'}
+                    </small>
                   </div>
                   <span className={`history-pill tone-${entry.status}`}>{entry.status}</span>
                 </button>
