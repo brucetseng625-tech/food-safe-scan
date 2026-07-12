@@ -65,8 +65,26 @@
 }
 
 .hero-text {
-  max-width: 36rem;
+  max-width: 34rem;
   color: rgba(245, 240, 232, 0.84);
+}
+
+.hero-guides {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 1rem;
+}
+
+.hero-guide {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.1rem;
+  padding: 0.4rem 0.8rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(245, 240, 232, 0.9);
+  font-size: 0.88rem;
 }
 
 .hero-stats,
@@ -110,42 +128,26 @@
   color: rgba(245, 240, 232, 0.7);
 }
 
-.rail-card {
-  padding: 1rem;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(8px);
-}
-
-.rail-title,
 .card-head,
 .section-heading,
 .loading-state,
 .result-top,
 .match-title,
 .resource-link,
+.detail-summary,
 .empty-state,
 .trust-box {
   display: flex;
   align-items: center;
 }
 
-.rail-title,
 .card-head,
 .section-heading,
 .result-top,
-.match-title {
+.match-title,
+.detail-summary {
   justify-content: space-between;
   gap: 0.75rem;
-}
-
-.flow-list {
-  margin: 0.9rem 0 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: 0.5rem;
-  color: rgba(245, 240, 232, 0.84);
 }
 
 .action-grid,
@@ -177,8 +179,14 @@
 .catalog-note,
 .result-top p,
 .match-card p,
+.card-footnote,
 .info-block small {
   color: var(--text-soft);
+}
+
+.card-copy {
+  margin: 0.85rem 0 0;
+  line-height: 1.6;
 }
 
 .cta-row,
@@ -271,15 +279,27 @@
 }
 
 .scanner-note {
-  margin: 0.8rem 0 0;
+  margin: 0.7rem 0 0;
   color: var(--text-soft);
-  font-size: 0.92rem;
-  line-height: 1.55;
+  font-size: 0.88rem;
+  line-height: 1.5;
 }
 
 .section-note {
   color: var(--text-soft);
   line-height: 1.5;
+}
+
+.suggestion-label,
+.card-footnote {
+  margin: 0.9rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.suggestion-label {
+  color: var(--text-soft);
+  font-weight: 700;
 }
 
 .scanner-host-hidden {
@@ -481,6 +501,14 @@ input:focus-visible {
   grid-template-columns: repeat(1, minmax(0, 1fr));
 }
 
+.result-grid-compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.result-grid-compact .info-block:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .info-block {
   display: grid;
   gap: 0.2rem;
@@ -500,6 +528,8 @@ input:focus-visible {
 .product-card,
 .steps-card,
 .unknown-card,
+.result-detail,
+.support-detail,
 .official-card {
   border-radius: 1.2rem;
   border: 1px solid rgba(12, 18, 17, 0.08);
@@ -544,6 +574,44 @@ input:focus-visible {
   background: rgba(255, 255, 255, 0.55);
 }
 
+.result-detail,
+.support-detail,
+.official-card {
+  padding: 1rem;
+}
+
+.detail-summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.detail-summary::-webkit-details-marker {
+  display: none;
+}
+
+.detail-summary strong,
+.detail-summary span {
+  display: block;
+}
+
+.detail-summary span {
+  margin-top: 0.22rem;
+  color: var(--text-soft);
+  font-size: 0.9rem;
+}
+
+.detail-count {
+  flex-shrink: 0;
+  min-width: 4rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(12, 18, 17, 0.08);
+  color: var(--ink);
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .brand-chip-row,
 .history-list,
 .official-list,
@@ -574,10 +642,11 @@ input:focus-visible {
   padding: 1rem;
 }
 
-.official-card {
+.official-card,
+.result-detail,
+.support-detail {
   display: grid;
   gap: 0.8rem;
-  padding: 1rem;
 }
 
 .official-card-head,
@@ -687,6 +756,10 @@ input:focus-visible {
   margin-top: 1rem;
 }
 
+.support-detail .resource-list {
+  margin-top: 0;
+}
+
 .resource-link {
   justify-content: space-between;
   padding: 0.95rem 1rem;
@@ -771,7 +844,7 @@ input:focus-visible {
 
 @media (min-width: 760px) {
   .hero-panel {
-    grid-template-columns: minmax(0, 1.5fr) minmax(18rem, 0.9fr);
+    grid-template-columns: minmax(0, 1fr);
     padding: 1.5rem;
   }
 
@@ -783,6 +856,10 @@ input:focus-visible {
   .result-grid,
   .match-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .result-grid-compact .info-block:last-child:nth-child(odd) {
+    grid-column: auto;
   }
 
   .cta-row {

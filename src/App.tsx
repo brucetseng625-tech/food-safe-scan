@@ -14,7 +14,6 @@ import {
   RefreshCcw,
   Search,
   ShieldAlert,
-  Smartphone,
   X,
 } from 'lucide-react'
 import { downstreamResources, officialResources, oilBlacklist, quickSuggestions } from './data/blacklist'
@@ -696,38 +695,29 @@ function App() {
       <section className="hero-panel">
         <div className="hero-copy">
           <span className="eyebrow">手機優先食安查詢</span>
-          <h1>掃一下條碼，或輸入食品名，就知道有沒有踩到官方下游名單</h1>
+          <h1>掃食品條碼，或輸入食品名、業者名，快速看官方名單有沒有命中</h1>
           <p className="hero-text">
-            這版把原本站分散的功能收斂成最短路徑：掃碼、輸入食品名或業者名、直接看官方命中。先幫民眾判斷，再帶他們往下核對來源。
+            先給你最直接的判斷，再往下看產品名、業者名、批號、有效日期與官方來源，手機上也能一路查到底。
           </p>
+
+          <div className="hero-guides">
+            <span className="hero-guide">可查：食品名、業者名、食品條碼</span>
+            <span className="hero-guide">結果優先顯示官方下游產品與業者名單</span>
+          </div>
 
           <div className="hero-stats">
             <div className="stat-card">
               <strong>{downstreamDataset?.preventiveProductCount ?? 440}</strong>
-              <span>預防性下架產品</span>
+              <span>下架產品</span>
             </div>
             <div className="stat-card">
               <strong>{downstreamDataset?.businessCount ?? 360}</strong>
-              <span>官方下游業者</span>
+              <span>下游業者</span>
             </div>
             <div className="stat-card">
               <strong>{tfdaDataset?.recordCount ?? 2487}</strong>
-              <span>食藥署不合格食品</span>
+              <span>TFDA 資料</span>
             </div>
-          </div>
-        </div>
-
-        <div className="hero-rail">
-          <div className="rail-card">
-            <div className="rail-title">
-              <Smartphone size={18} />
-              <span>新版操作節奏</span>
-            </div>
-            <ol className="flow-list">
-              <li>1. 直接掃食品條碼，或輸入食品名、業者名。</li>
-              <li>2. 先看有沒有命中官方下游產品或業者名單。</li>
-              <li>3. 需要時再往下看批號、有效日期、城市與官方連結。</li>
-            </ol>
           </div>
         </div>
       </section>
@@ -741,6 +731,8 @@ function App() {
             </div>
             <Barcode size={20} />
           </div>
+
+          <p className="card-copy">先掃條碼；如果相機開不起來，再改用拍照或從相簿上傳。</p>
 
           <div className="cta-row">
             <button type="button" className="primary-btn" onClick={() => void startScanner()}>
@@ -825,7 +817,7 @@ function App() {
             <Search size={20} />
           </div>
 
-          <p className="card-copy">適合直接輸入食品名、品牌或業者名。像「雙蔬鮪魚飯糰」或「南僑油脂事業股份有限公司」都能直接比對官方名單。</p>
+          <p className="card-copy">直接輸入食品名、品牌或業者名即可比對。像「雙蔬鮪魚飯糰」或「南僑油脂事業股份有限公司」都能查。</p>
 
           <form
             className="input-stack"
@@ -845,6 +837,7 @@ function App() {
             </button>
           </form>
 
+          <p className="suggestion-label">常見查法</p>
           <div className="suggestion-wrap">
             {quickSuggestions.map((suggestion) => (
               <button
@@ -861,10 +854,7 @@ function App() {
             ))}
           </div>
 
-          <div className="trust-box">
-            <CircleAlert size={18} />
-            <p>新版不會直接說「安全」，只會說有沒有命中官方下游產品、下游業者或不合格食品資料，以及下一步該去哪裡核對。</p>
-          </div>
+          <p className="card-footnote">系統只會告訴你是否命中目前載入的官方資料，不會直接宣告某食品絕對安全。</p>
         </article>
       </section>
 
@@ -892,7 +882,7 @@ function App() {
               <resultTone.icon size={28} />
             </div>
 
-            <div className="result-grid">
+            <div className="result-grid result-grid-compact">
               <div className="info-block">
                 <span className="info-label">查詢方式</span>
                 <strong>{lookupState.source === 'barcode' ? '條碼查詢' : '關鍵字查詢'}</strong>
@@ -931,17 +921,26 @@ function App() {
             ) : null}
 
             {lookupState.analysis.matchedProducts.length > 0 ? (
-              <div className="match-list">
-                {lookupState.analysis.matchedProducts.map(({ brand, item }) => (
-                  <article key={`${brand}-${item.name}`} className="match-card">
-                    <div className="match-title">
-                      <span>{brand}</span>
-                      <strong>{item.name}</strong>
-                    </div>
-                    <p>{item.affectedBusinesses} 個受波及據點，涵蓋 {item.cities.join('、')}</p>
-                  </article>
-                ))}
-              </div>
+              <details className="result-detail">
+                <summary className="detail-summary">
+                  <div>
+                    <strong>歷史油品黑名單命中</strong>
+                    <span>品牌與品項層級的歷史風險比對</span>
+                  </div>
+                  <span className="detail-count">{lookupState.analysis.matchedProducts.length} 項</span>
+                </summary>
+                <div className="match-list">
+                  {lookupState.analysis.matchedProducts.map(({ brand, item }) => (
+                    <article key={`${brand}-${item.name}`} className="match-card">
+                      <div className="match-title">
+                        <span>{brand}</span>
+                        <strong>{item.name}</strong>
+                      </div>
+                      <p>{item.affectedBusinesses} 個受波及據點，涵蓋 {item.cities.join('、')}</p>
+                    </article>
+                  ))}
+                </div>
+              </details>
             ) : null}
 
             {lookupState.analysis.status === 'watch' ? (
@@ -954,11 +953,14 @@ function App() {
             ) : null}
 
             {lookupState.downstreamMatches.productMatchCount > 0 ? (
-              <div className="official-card">
-                <div className="official-card-head">
-                  <strong>食藥署官方預防性下架產品</strong>
-                  <span>{lookupState.downstreamMatches.productMatchCount} 項</span>
-                </div>
+              <details className="official-card" open>
+                <summary className="detail-summary">
+                  <div>
+                    <strong>食藥署官方預防性下架產品</strong>
+                    <span>最接近消費者手上成品的官方名單</span>
+                  </div>
+                  <span className="detail-count">{lookupState.downstreamMatches.productMatchCount} 項</span>
+                </summary>
                 <div className="official-list">
                   {lookupState.downstreamMatches.productMatches.map((entry) => (
                     <article key={entry.id} className="official-item">
@@ -978,15 +980,18 @@ function App() {
                     先顯示前 {lookupState.downstreamMatches.productMatches.length} 項，完整名單請再點官方來源查看。
                   </small>
                 ) : null}
-              </div>
+              </details>
             ) : null}
 
             {lookupState.downstreamMatches.businessMatchCount > 0 ? (
-              <div className="official-card">
-                <div className="official-card-head">
-                  <strong>食藥署官方下游業者</strong>
-                  <span>{lookupState.downstreamMatches.businessMatchCount} 家</span>
-                </div>
+              <details className="official-card">
+                <summary className="detail-summary">
+                  <div>
+                    <strong>食藥署官方下游業者</strong>
+                    <span>如果你查的是通路、品牌方或製造業者，可從這裡往下看</span>
+                  </div>
+                  <span className="detail-count">{lookupState.downstreamMatches.businessMatchCount} 家</span>
+                </summary>
                 <div className="official-list">
                   {lookupState.downstreamMatches.businessMatches.map((entry) => (
                     <article key={entry.id} className="official-item">
@@ -1010,15 +1015,18 @@ function App() {
                     先顯示前 {lookupState.downstreamMatches.businessMatches.length} 家，完整名單請再點官方來源查看。
                   </small>
                 ) : null}
-              </div>
+              </details>
             ) : null}
 
             {lookupState.tfdaMatches.length > 0 ? (
-              <div className="official-card">
-                <div className="official-card-head">
-                  <strong>食藥署官方命中結果</strong>
-                  <span>{lookupState.tfdaMatches.length} 筆</span>
-                </div>
+              <details className="official-card">
+                <summary className="detail-summary">
+                  <div>
+                    <strong>食藥署官方不符合食品資料</strong>
+                    <span>延伸比對同名或同品牌食品的官方紀錄</span>
+                  </div>
+                  <span className="detail-count">{lookupState.tfdaMatches.length} 筆</span>
+                </summary>
                 <div className="official-list">
                   {lookupState.tfdaMatches.map((record, index) => (
                     <article key={`${record.id}-${index}`} className="official-item">
@@ -1034,7 +1042,7 @@ function App() {
                     </article>
                   ))}
                 </div>
-              </div>
+              </details>
             ) : null}
 
             {lookupState.analysis.matchedBrands.length > 0 ? (
@@ -1102,7 +1110,7 @@ function App() {
             ) : null}
           </div>
           <p className="support-copy">
-            條碼資料來自 Open Food Facts；官方不符合食品名單與中聯油脂案下游名單則在建置時直接同步食藥署官方 JSON / PDF，再隨網站一起發佈。
+            條碼資料來自 Open Food Facts；其餘名單則在建置時同步食藥署官方資料，再隨網站一起發佈。
           </p>
           {tfdaDataset || downstreamDataset ? (
             <div className="dataset-meta">
@@ -1131,20 +1139,36 @@ function App() {
           ) : null}
           {tfdaError ? <p className="inline-feedback warning">{tfdaError}</p> : null}
           {downstreamError ? <p className="inline-feedback warning">{downstreamError}</p> : null}
-          <div className="resource-list">
-            {officialResources.map((resource) => (
-              <a key={resource.url} href={resource.url} target="_blank" rel="noreferrer" className="resource-link">
-                <span>{resource.label}</span>
-                <ArrowUpRight size={16} />
-              </a>
-            ))}
-          </div>
+          <details className="support-detail">
+            <summary className="detail-summary">
+              <div>
+                <strong>查看官方來源與附件</strong>
+                <span>需要時再展開，不把主流程塞滿</span>
+              </div>
+              <span className="detail-count">展開</span>
+            </summary>
+            <div className="resource-list">
+              {officialResources.map((resource) => (
+                <a key={resource.url} href={resource.url} target="_blank" rel="noreferrer" className="resource-link">
+                  <span>{resource.label}</span>
+                  <ArrowUpRight size={16} />
+                </a>
+              ))}
+              {downstreamResources.map((resource) => (
+                <a key={resource.url} href={resource.url} target="_blank" rel="noreferrer" className="resource-link">
+                  <span>{resource.label}</span>
+                  <ArrowUpRight size={16} />
+                </a>
+              ))}
+            </div>
+          </details>
         </article>
 
         <article className="support-card">
           <div className="section-heading">
-            <span>黑名單清單</span>
+            <span>歷史油品清單</span>
           </div>
+          <p className="support-copy">這一塊是補充背景資料，不是你每次查詢都一定要先讀完。</p>
           <div className="catalog-list">
             {oilBlacklist.map((group) => (
               <details key={group.brand} className="catalog-item">
@@ -1164,23 +1188,6 @@ function App() {
                   ))}
                 </div>
               </details>
-            ))}
-          </div>
-        </article>
-
-        <article className="support-card">
-          <div className="section-heading">
-            <span>下游產品／業者清單</span>
-          </div>
-          <p className="support-copy">
-            目前這個網站主查問題油品本身；如果你要追第二層、第三層「用了這批油做成的食品或業者」，可以直接點下面官方名單。
-          </p>
-          <div className="resource-list">
-            {downstreamResources.map((resource) => (
-              <a key={resource.url} href={resource.url} target="_blank" rel="noreferrer" className="resource-link">
-                <span>{resource.label}</span>
-                <ArrowUpRight size={16} />
-              </a>
             ))}
           </div>
         </article>
